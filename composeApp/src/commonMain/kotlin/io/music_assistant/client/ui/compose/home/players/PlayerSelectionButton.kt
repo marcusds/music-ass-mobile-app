@@ -29,11 +29,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import io.music_assistant.client.data.LocalPlayerStatus
 import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.PlayerDataFixtures
 import io.music_assistant.client.data.model.client.PlayerType
 import io.music_assistant.client.ui.contentColorByLuminance
-import io.music_assistant.sendspin.api.PlayerState
 import musicassistantclient.composeapp.generated.resources.Res
 import musicassistantclient.composeapp.generated.resources.cd_current_player
 import org.jetbrains.compose.resources.stringResource
@@ -43,7 +43,7 @@ import org.jetbrains.compose.resources.stringResource
 fun PlayerSelectionButton(
     player: PlayerData,
     controlTint: Color = MaterialTheme.colorScheme.primary,
-    sendSpinState: PlayerState?,
+    sendSpinState: LocalPlayerStatus?,
     onSelectPlayer: () -> Unit = {},
     onGroupButton: () -> Unit = {},
 ) {
@@ -171,11 +171,10 @@ private fun PlayerButtonContent(
     }
 }
 
-private fun PlayerState.toDotColor(): Color = when (this) {
-    is PlayerState.Connected -> Color(0xFF4CAF50) // Green
-    is PlayerState.Connecting, is PlayerState.Reconnecting -> Color(0xFFFF9800) // Orange
-    is PlayerState.Failed -> Color(0xFFF44336) // Red
-    PlayerState.Disabled -> Color(0xFFBDBDBD) // Light gray
+private fun LocalPlayerStatus.toDotColor(): Color = when (this) {
+    LocalPlayerStatus.Connected -> Color(0xFF4CAF50) // Green
+    LocalPlayerStatus.Connecting, LocalPlayerStatus.Reconnecting -> Color(0xFFFF9800) // Orange
+    LocalPlayerStatus.Failed -> Color(0xFFF44336) // Red
 }
 
 @Preview
@@ -195,7 +194,7 @@ private fun PlayerSelectionButtonLocalPlayerPreview() {
     MaterialTheme {
         PlayerSelectionButton(
             player = PlayerDataFixtures.playerData().copy(isLocal = true),
-            sendSpinState = PlayerState.Connecting(0),
+            sendSpinState = LocalPlayerStatus.Connecting,
         )
     }
 }
