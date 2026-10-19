@@ -162,6 +162,14 @@ actual class PlatformFeature {
   When the network comes back in that time, the connection stays, and the ICE monitor of the manager fails it
   if the path died. `DirectTransport` does not watch the network: the WebSocket ping finds a dead socket.
   The reconnect loops wait for the network before an attempt.
+- `WebRTCTransport` runs every connect and reconnect (ICE failure, forced reconnect, network loss) in one
+  `SerialJobSlot`. A new start cancels the old job and waits until it has ended, so there is one reconnect loop
+  and one `WebRTCConnectionManager` at a time. A replaced manager is always disconnected, uncancellable and
+  bounded to 5 s. `disconnect()` runs that teardown in the parent scope, because `close()` cancels the
+  transport scope at once.
+- A background drop saves `backgroundedConnectionInfo`, and the next foreground reconnects from it. Every new
+  connection and every disconnect clears it (`tearDownTransport`), so a later foreground does not tear down
+  a session that replaced the background one.
 
 ## Artwork Loading
 
@@ -242,7 +250,14 @@ The built-in player is the `:sendspin` Gradle module (`io.music_assistant.sendsp
 
 **App side** (`composeApp`):
 - `data/LocalPlayerAdapter` owns the player and everything about the MA player model: optimistic UI, the offline command queue, and server event reconciliation. `LocalPlayerFactory` builds the player from the platform ports (sink, decoders, key store), so a test gives the adapter a fake player (`LocalPlayerAdapterTest`).
-- `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel. A direct session gets the proxied WebSocket at `<wsUrl>/sendspin`, or the custom Sendspin server from settings. A reconnecting MA session keeps the last endpoint.
+- `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel.
+  A channel serves one Sendspin connection. The `sendspin` channel that is negotiated with the peer connection
+  serves the first one. From schema 49 (`IN_BAND_SENDSPIN_SCHEMA`), a Sendspin reconnect opens a new `sendspin`
+  channel on the live peer connection, so the API session stays up. A full WebRTC renegotiation
+  (`forceWebRTCReconnect`, which restarts the API session) is the fallback for an older server, for a channel
+  that does not open, and after two in-band channels in a row that closed before the server sent a frame
+  (`SendspinChannelPlan`). A direct session gets the proxied WebSocket at `<wsUrl>/sendspin`, or the custom
+  Sendspin server from settings. A reconnecting MA session keeps the last endpoint.
 - `player/local/` holds the platform sinks and decoders. Android: `AudioTrackSink` and `AndroidDecoderFactory`. iOS: `AudioQueueSink` and pass-through `IosDecoderFactory` (the native player decodes).
 - The control plane stays on the MA REST API. Sendspin carries audio only (role `player@v1`).
 - Only the Noise-encrypted protocol is supported. `supportsEncryptedSendspin(schemaVersion)` requires MA schema 45 or newer. A known lower schema produces `Endpoint.Unsupported`, and the player fails without opening a transport. A missing schema is inconclusive: endpoint selection permits a handshake rather than rejecting the server. An explicit unsupported wire version, and a `server/error` for an unsupported version or suite, fail terminally; network failures and handshake timeouts still retry.

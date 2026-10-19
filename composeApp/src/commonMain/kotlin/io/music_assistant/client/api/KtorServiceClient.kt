@@ -833,6 +833,9 @@ class KtorServiceClient(
         transport?.disconnect()
         transport?.close()
         transport = null
+        // A new connection or a disconnect ends the backgrounded session, so the next
+        // foreground must not tear down whatever replaced it.
+        backgroundedConnectionInfo = null
         _sessionState.update { newState }
         rpcEngine.failAll(ConnectionLostException(cause))
     }
