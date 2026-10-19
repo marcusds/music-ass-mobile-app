@@ -71,6 +71,7 @@ import io.music_assistant.client.data.model.client.items.PlaylistOwnerLine
 import io.music_assistant.client.data.model.client.items.RefreshItemAction
 import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.play.PlayMode
+import io.music_assistant.client.imageloader.ArtworkSizeClass
 import io.music_assistant.client.imageloader.rememberArtworkRequest
 import io.music_assistant.client.ui.INACTIVE_ALPHA
 import io.music_assistant.client.ui.compose.common.LocalDislikeSupported
@@ -538,7 +539,7 @@ private fun Image(
             RoundedCornerShape(16.dp)
         }
         AsyncImage(
-            model = rememberArtworkRequest(item.image(ImageType.THUMB)?.url),
+            model = rememberArtworkRequest(item.image(ImageType.THUMB)?.url, ArtworkSizeClass.COLOR_SOURCE),
             placeholder = placeholder,
             fallback = placeholder,
             contentDescription = null,
