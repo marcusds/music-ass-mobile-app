@@ -65,6 +65,7 @@ public class AudioTrackSink(
         }
         val minBuffer = AudioTrack.getMinBufferSize(format.sampleRate, channelMask, encoding)
         check(minBuffer > 0) { "audio configuration not supported by the device ($minBuffer)" }
+        val bufferBytes = bufferSizeBytes(minBuffer, format)
 
         val track = AudioTrack.Builder()
             .setAudioAttributes(MEDIA_ATTRIBUTES)
@@ -75,8 +76,7 @@ public class AudioTrackSink(
                     .setEncoding(encoding)
                     .build(),
             )
-            // 4x minimum absorbs scheduling jitter while keeping the steady-state fill low.
-            .setBufferSizeInBytes(minBuffer * BUFFER_MULTIPLIER)
+            .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             // Not LOW_LATENCY: aptX Adaptive "Auto-adjust" switches codec profile on every foreground
             // change of a low-latency track, which pauses playback (#1141). The extra mixer delay is
@@ -94,9 +94,27 @@ public class AudioTrackSink(
         track.play()
         logger.i {
             "AudioTrack opened: ${format.sampleRate}Hz ${format.channels}ch ${format.bitDepth}bit, " +
-                "buffer ${minBuffer * BUFFER_MULTIPLIER}, performanceMode=${track.performanceMode}"
+                "buffer $bufferBytes (${track.bufferSizeInFrames} frames), performanceMode=${track.performanceMode}"
         }
         return Handle(track, format)
+    }
+
+    /**
+     * The track's buffer is the cushion between the audio thread and the mixer: the scheduler
+     * writes until it is full, and the device plays from it while the thread decodes the next
+     * chunk (a MediaCodec FLAC frame can take over 100 ms) or is descheduled. A few times the
+     * minimum is often under 100 ms, less than one ~100 ms chunk, so such a stall underruns.
+     * [TARGET_BUFFER_MICROS] holds several chunks. The size adds no latency: the scheduler counts
+     * the queued frames in its lead (head position against frames written), a pause or seek
+     * flushes the track, and playback starts at the first frame ([AudioTrack.setStartThresholdInFrames]).
+     * Before API 31 there is no start threshold and the track waits for a full buffer, so a large
+     * one would delay every start: those versions keep the old 4x minimum.
+     */
+    private fun bufferSizeBytes(minBuffer: Int, format: SinkFormat): Int {
+        val small = minBuffer * BUFFER_MULTIPLIER
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return small
+        val target = format.sampleRate.toLong() * TARGET_BUFFER_MICROS / MICROS_PER_SECOND * format.bytesPerFrame
+        return maxOf(small.toLong(), target).toInt()
     }
 
     private inner class Handle(private val track: AudioTrack, private val format: SinkFormat) : SinkHandle {
@@ -241,6 +259,8 @@ public class AudioTrackSink(
 
     private companion object {
         const val BUFFER_MULTIPLIER = 4
+        const val TARGET_BUFFER_MICROS = 500_000L
+        const val MICROS_PER_SECOND = 1_000_000L
         const val DUCK_GAIN = 0.2f
         val MEDIA_ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
