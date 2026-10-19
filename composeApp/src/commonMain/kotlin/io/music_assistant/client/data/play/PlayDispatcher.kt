@@ -1,8 +1,8 @@
 package io.music_assistant.client.data.play
 
 import co.touchlab.kermit.Logger
-import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
+import io.music_assistant.client.utils.HasConnectionData
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -77,7 +77,7 @@ class PlayDispatcher(
         try {
             while (true) {
                 val next = takeNext(queueId) ?: return
-                apiClient.sendRequest(next.toRequest())
+                apiClient.sendRequest(next.toPlayMediaRequest(schemaVersion(next)))
                     .onFailure { log.w(it) { "play_media failed for $next: ${it.message}" } }
             }
         } catch (e: Throwable) {
@@ -100,11 +100,8 @@ class PlayDispatcher(
         return next
     }
 
-    private fun PlayRequest.toRequest() = Request.Library.play(
-        media = media,
-        queueOrPlayerId = queueOrPlayerId,
-        option = option,
-        endlessMixMode = endlessMixMode,
-        startItem = startItem,
-    )
+    /** Reads the session only for an endless mix, the one request whose wire depends on it. */
+    private fun schemaVersion(request: PlayRequest): Int? =
+        request.takeIf { it.endlessMixMode }
+            ?.let { (apiClient.sessionState.value as? HasConnectionData)?.serverInfo?.schemaVersion }
 }
