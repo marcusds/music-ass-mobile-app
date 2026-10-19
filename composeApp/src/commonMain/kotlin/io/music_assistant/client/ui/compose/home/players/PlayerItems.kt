@@ -73,6 +73,7 @@ import io.music_assistant.client.data.model.client.items.canBeFavorited
 import io.music_assistant.client.data.model.client.presentationChapter
 import io.music_assistant.client.data.model.client.qualityTier
 import io.music_assistant.client.data.model.client.toAbsoluteSeekSeconds
+import io.music_assistant.client.imageloader.ArtworkSizeClass
 import io.music_assistant.client.imageloader.rememberArtworkRequest
 import io.music_assistant.client.ui.alphaOn
 import io.music_assistant.client.ui.compose.common.CenteredThreeSlotRow
@@ -167,7 +168,7 @@ fun CompactPlayerItem(
                         placeholder = placeholder,
                         fallback = placeholder,
                         error = placeholder,
-                        model = rememberArtworkRequest(currentMedia.imageUrl),
+                        model = rememberArtworkRequest(currentMedia.imageUrl, ArtworkSizeClass.COLOR_SOURCE),
                         contentDescription = currentMedia.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -353,7 +354,7 @@ fun FullPlayerItem(
                     placeholder = placeholder,
                     fallback = placeholder,
                     error = placeholder,
-                    model = rememberArtworkRequest(it),
+                    model = rememberArtworkRequest(it, ArtworkSizeClass.COLOR_SOURCE),
                     contentDescription = currentMedia.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
