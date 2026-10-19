@@ -153,6 +153,16 @@ actual class PlatformFeature {
   in `KeychainClientIdentity`, only while `clientCertificateAlias` is set. The Darwin engine owns its session pool,
   so `KtorServiceClient` makes a new client when the certificate changes.
 
+## Network Loss
+
+- `NetworkMonitor.isAvailable` follows the default network. On Android, `DefaultNetworkTracker` ignores the
+  loss of a network that is no longer the default, because a handoff can report the new network before the
+  loss of the old one.
+- `WebRTCTransport` does not end a live connection on a network loss. It waits 6 s (`watchNetworkLoss`).
+  When the network comes back in that time, the connection stays, and the ICE monitor of the manager fails it
+  if the path died. `DirectTransport` does not watch the network: the WebSocket ping finds a dead socket.
+  The reconnect loops wait for the network before an attempt.
+
 ## Artwork Loading
 
 - **`ArtworkRepository`**: Single owner of artwork fetching, disk caching, freshness, and concurrent-request deduplication. Shared by all platforms.
