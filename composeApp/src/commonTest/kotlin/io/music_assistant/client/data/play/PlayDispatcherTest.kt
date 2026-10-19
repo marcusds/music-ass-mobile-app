@@ -1,14 +1,20 @@
 package io.music_assistant.client.data.play
 
 import io.music_assistant.client.api.Answer
+import io.music_assistant.client.api.ConnectionInfo
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.data.model.client.QueueOption
+import io.music_assistant.client.data.model.server.ServerInfo
 import io.music_assistant.client.data.model.server.StubServiceClient
+import io.music_assistant.client.utils.ConnectionData
+import io.music_assistant.client.utils.SessionState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -106,9 +112,34 @@ class PlayDispatcherTest {
         assertEquals(setOf("kitchen", "office"), dispatcher.busyQueueIds.value)
     }
 
+    @Test
+    fun `an endless mix uses the wire of the server the session is on`() = runTest {
+        val client = GatedClient()
+        val dispatcher = PlayDispatcher(client, backgroundScope)
+
+        client.sessionState.value = connectedTo(schemaVersion = 31)
+        dispatcher.play(play("library://track/1", QueueOption.REPLACE, endlessMix = true))
+        runCurrent()
+        client.answer()
+        runCurrent()
+        client.sessionState.value = connectedTo(schemaVersion = 65)
+        dispatcher.play(play("library://track/1", QueueOption.REPLACE, endlessMix = true))
+        runCurrent()
+
+        assertEquals(
+            listOf("library://track/1", "radio_playlist://playlist/library://track/1"),
+            client.sentMedia,
+        )
+        assertEquals(listOf(true, false), client.sentRadioMode)
+    }
+
     /** Holds every request until the test answers it, oldest first. */
     private class GatedClient : StubServiceClient() {
+        override val sessionState = MutableStateFlow<SessionState>(SessionState.Disconnected.Initial)
         private val sent = mutableListOf<Request>()
+
+        val sentRadioMode: List<Boolean>
+            get() = sent.map { it.args?.get("radio_mode")?.jsonPrimitive?.boolean ?: false }
         private val pending = ArrayDeque<CompletableDeferred<Result<Answer>>>()
 
         val sentMedia: List<String>
@@ -129,8 +160,17 @@ class PlayDispatcherTest {
     private companion object {
         const val QUEUE = "queue"
 
-        fun play(media: String, option: QueueOption = QueueOption.PLAY, queue: String = QUEUE) =
-            PlayRequest(queueOrPlayerId = queue, media = listOf(media), option = option)
+        fun play(
+            media: String,
+            option: QueueOption = QueueOption.PLAY,
+            queue: String = QUEUE,
+            endlessMix: Boolean = false,
+        ) = PlayRequest(queueOrPlayerId = queue, media = listOf(media), option = option, endlessMixMode = endlessMix)
+
+        fun connectedTo(schemaVersion: Int) = SessionState.Connected.Direct(
+            connectionInfo = ConnectionInfo(host = "ma.local", port = 8095, isTls = false),
+            connectionData = ConnectionData(serverInfo = ServerInfo(serverId = "s", schemaVersion = schemaVersion)),
+        )
 
         fun emptyAnswer() = Answer(json = buildJsonObject { put("message_id", JsonPrimitive("fake")) })
     }
