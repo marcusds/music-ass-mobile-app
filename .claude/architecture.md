@@ -239,6 +239,13 @@ actual class PlatformFeature {
 - Use `remember`/`derivedStateOf` for computed values
 - Split large composables into smaller files by meaning
 - Previews only when explicitly requested
+- Read fast-changing values in the smallest composable that shows them. The live position and the
+  buffer level tick every 500 ms, so only `PlayerTimeline` reads them in the full player, and
+  `FullPlayerItem` derives the chapter with `derivedStateOf`. `MainNavigationRoot` reads
+  `playersState` only in lambdas, effects, derived states and the player picker sheet, and keys the
+  pager sync on the selected index and the player ids.
+- Do not use `PlayerData` as a map key or a `remember` key in a loop. It holds the whole queue, so
+  its hash is expensive. Key by `playerId`, and wrap a `remember` in a loop in `key(playerId)`.
 
 ## State Management
 
@@ -301,6 +308,10 @@ The built-in player is the `:sendspin-kmp` Gradle module (`io.music_assistant.se
 
 **App side** (`composeApp`):
 - `data/LocalPlayerAdapter` owns the player and everything about the MA player model: optimistic UI, the offline command queue, and server event reconciliation. `LocalPlayerFactory` builds the player from the platform ports (sink, decoders, key store), so a test gives the adapter a fake player (`LocalPlayerAdapterTest`).
+- The UI gets `MainDataSource.sendspinState` as `LocalPlayerStatus` (`data/LocalPlayerStatus.kt`), not as
+  `PlayerState`. The player publishes a new `PlayerState` after each audio chunk with a new `bufferedMs`,
+  and the full state would rebuild the player UI many times a second. The buffer band reads
+  `localBufferedSeconds`, sampled at 500 ms.
 - `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel. A direct session gets the proxied WebSocket at `<wsUrl>/sendspin`, or the custom Sendspin server from settings. A reconnecting MA session keeps the last endpoint. Each Sendspin connection attempt needs a new data channel. From server schema 49 (`LABEL_ROUTED_CHANNELS_SCHEMA`), the app opens it in-band on the live peer, so the MA session continues. On an older server, or if the new channel does not open, the app renegotiates the peer connection.
 - Sinks and decoders: Android uses `AudioTrackSink` and `AndroidDecoderFactory` from the module. On iOS, `player/local/` holds `AudioQueueSink` and pass-through `IosDecoderFactory` (the native player decodes).
 - The control plane stays on the MA REST API. Sendspin carries audio only (role `player@v1`).

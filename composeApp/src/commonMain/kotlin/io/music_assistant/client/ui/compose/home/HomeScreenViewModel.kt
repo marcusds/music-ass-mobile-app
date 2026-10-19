@@ -6,6 +6,7 @@ import co.touchlab.kermit.Logger
 import io.music_assistant.client.api.APICommands
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
+import io.music_assistant.client.data.LocalPlayerStatus
 import io.music_assistant.client.data.MainDataSource
 import io.music_assistant.client.data.model.client.Player
 import io.music_assistant.client.data.model.client.PlayerData
@@ -35,7 +36,6 @@ import io.music_assistant.client.utils.DataConnectionState
 import io.music_assistant.client.utils.HasConnectionData
 import io.music_assistant.client.utils.SessionState
 import io.music_assistant.client.utils.resultAs
-import io.music_assistant.sendspin.api.PlayerState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -558,7 +558,7 @@ class HomeScreenViewModel(
             val playerData: List<PlayerData>,
             val selectedPlayerIndex: Int? = null,
             val localPlayerId: String? = null,
-            val sendspinState: PlayerState? = null,
+            val sendspinState: LocalPlayerStatus? = null,
             /** Every listed player, including those left out of [playerData]. */
             val allPlayerData: List<PlayerData> = playerData,
         ) : PlayersState()

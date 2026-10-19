@@ -23,12 +23,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -79,7 +82,6 @@ import io.music_assistant.client.ui.compose.home.players.DspSettingsViewModel
 import io.music_assistant.client.ui.compose.home.players.PlayersPager
 import io.music_assistant.client.ui.compose.home.players.QueueDjViewModel
 import io.music_assistant.client.ui.compose.home.players.SelectPlayerSheet
-import io.music_assistant.client.ui.compose.home.players.contentDescription
 import io.music_assistant.client.ui.compose.home.players.iconRes
 import io.music_assistant.client.ui.compose.home.players.label
 import io.music_assistant.client.ui.compose.home.players.rememberHideUnavailablePlayers
@@ -112,6 +114,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import musicassistantclient.composeapp.generated.resources.Res
+import musicassistantclient.composeapp.generated.resources.cd_current_player
 import musicassistantclient.composeapp.generated.resources.app_name
 import musicassistantclient.composeapp.generated.resources.nav_discover
 import musicassistantclient.composeapp.generated.resources.nav_library
@@ -119,6 +122,7 @@ import musicassistantclient.composeapp.generated.resources.nav_menu
 import musicassistantclient.composeapp.generated.resources.nav_search
 import musicassistantclient.composeapp.generated.resources.nav_settings
 import musicassistantclient.composeapp.generated.resources.players_remote_volume_hint
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.stringResource
 import org.jetbrains.compose.resources.vectorResource
 import org.koin.compose.koinInject
@@ -158,25 +162,36 @@ fun MainNavigationRoot(
         }
     }
 
-    val playersState by homeScreenViewModel.playersState.collectAsStateWithLifecycle()
+    // The players state changes with every player update. Read it only in lambdas, effects,
+    // derived states and child composables: a read in this scope would recompose the whole app UI.
+    val playersState = homeScreenViewModel.playersState.collectAsStateWithLifecycle()
+    val currentPlayersData = { playersState.value as? HomeScreenViewModel.PlayersState.Data }
     // Single pager state used across all views
-    val data = playersState as? HomeScreenViewModel.PlayersState.Data
     val playerPagerState = rememberPagerState(
-        initialPage = data?.selectedPlayerIndex ?: 0,
-        pageCount = { data?.playerData?.size ?: 0 },
+        initialPage = Snapshot.withoutReadObservation { currentPlayersData()?.selectedPlayerIndex ?: 0 },
+        pageCount = { currentPlayersData()?.playerData?.size ?: 0 },
     )
+
+    // Only a new selection or a new page list moves the pager. A restart on every player update
+    // would scroll the pager back to the selection while a swipe settles.
+    val pagerSync by remember {
+        derivedStateOf {
+            currentPlayersData()?.let { data ->
+                data.selectedPlayerIndex to data.playerData.map { it.playerId }
+            }
+        }
+    }
 
     // Bidirectional pager <-> selection sync
     // Selection→pager runs first (data layer priority), then pager→selection watches user swipes
-    LaunchedEffect(playerPagerState, playersState) {
-        val currentData = playersState as? HomeScreenViewModel.PlayersState.Data
-            ?: return@LaunchedEffect
-        val target = currentData.selectedPlayerIndex ?: return@LaunchedEffect
+    LaunchedEffect(playerPagerState, pagerSync) {
+        val target = pagerSync?.first ?: return@LaunchedEffect
         if (!playerPagerState.isScrollInProgress) {
             playerPagerState.animateScrollToPage(target)
         }
 
         snapshotFlow { playerPagerState.settledPage }.collect { currentPage ->
+            val currentData = currentPlayersData() ?: return@collect
             currentData.playerData.getOrNull(currentPage)
                 // Only a swipe to another player is a user choice. Re-writing the page the
                 // scroll above just landed on would persist the resolver's fallback (first
@@ -251,14 +266,15 @@ fun MainNavigationRoot(
     val searchScreenState = remember { mutableStateOf<SearchScreenState?>(null) }
 
     val remoteVolumeHint = stringResource(Res.string.players_remote_volume_hint)
-    val viewingRemote = data?.selectedPlayer?.isLocal == false
+    val viewingRemote by remember {
+        derivedStateOf { currentPlayersData()?.selectedPlayer?.isLocal == false }
+    }
     val currentHint by rememberUpdatedState(remoteVolumeHint)
-    val observingRemote by rememberUpdatedState(viewingRemote)
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner, volumeButtonService) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             volumeButtonService.buttonPresses.collect {
-                if (observingRemote) {
+                if (viewingRemote) {
                     toastState.showToast(currentHint, ToastDuration.SHORT)
                 }
             }
@@ -270,31 +286,19 @@ fun MainNavigationRoot(
     val rootScreenEditing = homeScreenState.value?.editMode == true
 
     var showPlayerSelection by remember { mutableStateOf(false) }
-    playersState.let {
-        if (it is HomeScreenViewModel.PlayersState.Data) {
-            val selectedPlayer = it.selectedPlayer
-            if (selectedPlayer != null) {
-                if (showPlayerSelection) {
-                    val leaderLeaveSupported by homeScreenViewModel.leaderLeaveSupported
-                        .collectAsStateWithLifecycle()
+    if (showPlayerSelection) {
+        PlayerSelectionSheet(
+            playersState = playersState,
+            homeScreenViewModel = homeScreenViewModel,
+            onDismissRequest = { showPlayerSelection = false },
+        )
+    }
 
-                    SelectPlayerSheet(
-                        selectedPlayer = selectedPlayer,
-                        players = it.playerData,
-                        onDismissRequest = { showPlayerSelection = false },
-                        onMoveToPlayer = { id: String ->
-                            it.playerData.find { playerData -> playerData.player.id == id }?.player?.let { player ->
-                                homeScreenViewModel.selectPlayer(player)
-                            }
-                        },
-                        onReorder = homeScreenViewModel::onPlayersSortChanged,
-                        onPlayerAction = homeScreenViewModel::playerAction,
-                        hideUnavailable = rememberHideUnavailablePlayers(),
-                        onToggleHideUnavailable = rememberToggleHideUnavailablePlayers(),
-                        onAdjustPlaybackDelay = homeScreenViewModel::adjustSendspinStaticDelayMs,
-                        canLeaveGroup = leaderLeaveSupported,
-                    )
-                }
+    // Only what the nav item shows, so a player update that keeps it does not recompose this scope.
+    val selectedPlayerLabel by remember {
+        derivedStateOf {
+            currentPlayersData()?.selectedPlayer?.let {
+                SelectedPlayerLabel(name = it.player.name, label = it.label(), icon = it.iconRes())
             }
         }
     }
@@ -320,24 +324,15 @@ fun MainNavigationRoot(
             goToSettings = goToSettings,
         )
 
-        val playSelectionItem: NavigationItem? = playersState.let { state ->
-            if (state is HomeScreenViewModel.PlayersState.Data) {
-                val selectedPlayer = state.selectedPlayer
-                if (selectedPlayer != null) {
-                    NavigationItem(
-                        selected = false,
-                        onClick = { showPlayerSelection = true },
-                        icon = vectorResource(selectedPlayer.iconRes()),
-                        label = selectedPlayer.label(),
-                        marqueeLabel = true,
-                        contentDescription = selectedPlayer.contentDescription(),
-                    )
-                } else {
-                    null
-                }
-            } else {
-                null
-            }
+        val playSelectionItem: NavigationItem? = selectedPlayerLabel?.let { selected ->
+            NavigationItem(
+                selected = false,
+                onClick = { showPlayerSelection = true },
+                icon = vectorResource(selected.icon),
+                label = selected.label,
+                marqueeLabel = true,
+                contentDescription = stringResource(Res.string.cd_current_player, selected.name),
+            )
         }
 
         AdaptiveNavigationBarLayout(
@@ -366,7 +361,7 @@ fun MainNavigationRoot(
                                 content = { expanded, contentPadding ->
                                     PlayersPager(
                                         playerPagerState = playerPagerState,
-                                        state = playersState,
+                                        state = playersState.value,
                                         homeScreenViewModel = homeScreenViewModel,
                                         actionsViewModel = playerActionsViewModel,
                                         dspSettingsViewModel = dspSettingsViewModel,
@@ -437,6 +432,37 @@ fun MainNavigationRoot(
         )
         ToastHost(toastState = toastState)
     }
+}
+
+private data class SelectedPlayerLabel(val name: String, val label: String, val icon: DrawableResource)
+
+/** The player picker. It reads [playersState] in its own scope, so a player update recomposes the sheet only. */
+@Composable
+private fun PlayerSelectionSheet(
+    playersState: State<HomeScreenViewModel.PlayersState>,
+    homeScreenViewModel: HomeScreenViewModel,
+    onDismissRequest: () -> Unit,
+) {
+    val data = playersState.value as? HomeScreenViewModel.PlayersState.Data ?: return
+    val selectedPlayer = data.selectedPlayer ?: return
+    val leaderLeaveSupported by homeScreenViewModel.leaderLeaveSupported.collectAsStateWithLifecycle()
+
+    SelectPlayerSheet(
+        selectedPlayer = selectedPlayer,
+        players = data.playerData,
+        onDismissRequest = onDismissRequest,
+        onMoveToPlayer = { id: String ->
+            data.playerData.find { playerData -> playerData.player.id == id }?.player?.let { player ->
+                homeScreenViewModel.selectPlayer(player)
+            }
+        },
+        onReorder = homeScreenViewModel::onPlayersSortChanged,
+        onPlayerAction = homeScreenViewModel::playerAction,
+        hideUnavailable = rememberHideUnavailablePlayers(),
+        onToggleHideUnavailable = rememberToggleHideUnavailablePlayers(),
+        onAdjustPlaybackDelay = homeScreenViewModel::adjustSendspinStaticDelayMs,
+        canLeaveGroup = leaderLeaveSupported,
+    )
 }
 
 @Composable
