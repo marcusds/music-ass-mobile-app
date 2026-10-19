@@ -123,6 +123,31 @@ internal fun sessionQueueItemId(queueSlotId: String): Long = queueSlotId.hashCod
 internal fun sessionChapterItemId(queueSlotId: String, chapterIndex: Int): Long =
     "chapter:$queueSlotId:$chapterIndex".hashCode().toLong()
 
+// The session queue holds at most this many slots. Every row costs an artwork token and
+// IPC to each controller, and a car host lists the queue for a glance, not for the whole
+// of a long radio or library queue. The full queue stays in the app.
+internal const val SESSION_QUEUE_WINDOW = 200
+
+// Slots kept before the current one, so the host can still go back a few tracks.
+internal const val SESSION_QUEUE_HISTORY = 20
+
+// The window start moves in steps of this many slots, so advancing one track does not
+// rewrite the whole session queue each time.
+internal const val SESSION_QUEUE_WINDOW_STEP = 50
+
+/**
+ * The part of a queue that the session publishes: [SESSION_QUEUE_WINDOW] slots that always
+ * contain [currentIndex], starting a little before it. A queue that fits is returned whole,
+ * and a negative [currentIndex] (no current slot) gives the start of the queue.
+ */
+internal fun <T> List<T>.sessionQueueWindow(currentIndex: Int): List<T> {
+    if (size <= SESSION_QUEUE_WINDOW) return this
+    val step = SESSION_QUEUE_WINDOW_STEP
+    val start = ((currentIndex - SESSION_QUEUE_HISTORY).coerceAtLeast(0) / step * step)
+        .coerceAtMost(size - SESSION_QUEUE_WINDOW)
+    return subList(start, start + SESSION_QUEUE_WINDOW)
+}
+
 internal val QueueDisplayRow.sessionId: Long
     get() = when (this) {
         is QueueDisplayRow.QueueItem -> sessionQueueItemId(item.id)
@@ -239,6 +264,21 @@ class SharedMediaSessionManager(
     private var lastBitmap: Bitmap? = null
     private var lastMultiPlayer: Boolean = false
 
+    // What the session holds now, so a write skips the parts that did not change. The
+    // metadata carries the album-art bitmap, which the system rescales and sends to every
+    // controller (SystemUI, Android Auto) on each setMetadata. Null forces the next write.
+    private var writtenPlayback: MediaNotificationData? = null
+    private var writtenMetadata: SessionMetadata? = null
+
+    // Bitmap compares by identity: the bitmap flow keeps one instance per artwork URL.
+    private data class SessionMetadata(
+        val title: String,
+        val artist: String,
+        val album: String?,
+        val duration: Long?,
+        val bitmap: Bitmap?,
+    )
+
     // Current error state (non-null = error takes precedence over playback). Only a real
     // AA host sets this (see AndroidAutoPlaybackService); cleared when that host goes away.
     private var currentError: ErrorState? = null
@@ -273,6 +313,8 @@ class SharedMediaSessionManager(
             currentError = null
             lastData = null
             lastBitmap = null
+            writtenPlayback = null
+            writtenMetadata = null
             autoPlayHandler = null
             strings = null
         }
@@ -372,11 +414,16 @@ class SharedMediaSessionManager(
         // Queue (separate session property). Dedup on the stable id list: setQueue is an
         // expensive IPC write AA hosts react to, so unrelated emissions (volume, etc.)
         // must not churn it.
-        // Rows mirror the in-app queue: chapter rows follow the current audiobook.
+        // Rows mirror the in-app queue: chapter rows follow the current audiobook. Rows are
+        // rebuilt only when the items or the current slot change, never on position ticks, and
+        // only for the window around the current slot (see [sessionQueueWindow]).
         scope.launch {
             sourcePlayerData()
-                .map { (player, _) ->
-                    player.queueItems.orEmpty().buildDisplayRows(player.queueInfo?.currentItem?.id)
+                .map { (player, _) -> player.queueItems.orEmpty() to player.queueInfo?.currentItem?.id }
+                .distinctUntilChanged()
+                .map { (items, currentId) ->
+                    items.sessionQueueWindow(items.indexOfFirst { it.id == currentId })
+                        .buildDisplayRows(currentId)
                 }
                 .distinctUntilChanged { old, new -> old.map { it.key } == new.map { it.key } }
                 .collect { rows -> updateQueue(rows.toSessionQueue()) }
@@ -636,12 +683,32 @@ class SharedMediaSessionManager(
         multiPlayer: Boolean = false,
     ) {
         val session = mediaSession ?: return
+        val playbackUnchanged = writtenPlayback
+            ?.let { MediaNotificationData.areTooSimilarToUpdate(it, data) } == true
+        if (!playbackUnchanged) {
+            session.setPlaybackState(playbackStateOf(data))
+            writtenPlayback = data
+        }
+        val metadata = SessionMetadata(
+            title = titleMetadata(data),
+            artist = artistMetadata(data, multiPlayer),
+            album = data.album,
+            duration = data.duration,
+            bitmap = bitmap,
+        )
+        if (metadata != writtenMetadata) {
+            session.setMetadata(metadata.toMediaMetadata())
+            writtenMetadata = metadata
+        }
+    }
+
+    private fun playbackStateOf(data: MediaNotificationData): PlaybackStateCompat {
         val state = if (data.isPlaying) {
             PlaybackStateCompat.STATE_PLAYING
         } else {
             PlaybackStateCompat.STATE_PAUSED
         }
-        val playbackState = PlaybackStateCompat.Builder()
+        return PlaybackStateCompat.Builder()
             .setActions(SESSION_TRANSPORT_ACTIONS)
             .setState(
                 state,
@@ -656,30 +723,18 @@ class SharedMediaSessionManager(
                 sessionActions(data).forEach { builder.addCustomAction(customAction(it, data)) }
             }
             .build()
-        session.setPlaybackState(playbackState)
+    }
 
-        val metadata = MediaMetadataCompat.Builder()
-            .putString(
-                MediaMetadataCompat.METADATA_KEY_TITLE,
-                titleMetadata(data),
-            )
-            .putString(
-                MediaMetadataCompat.METADATA_KEY_ARTIST,
-                artistMetadata(data, multiPlayer),
-            )
-            .putString(
-                MediaMetadataCompat.METADATA_KEY_ALBUM,
-                data.album,
-            )
+    private fun SessionMetadata.toMediaMetadata(): MediaMetadataCompat =
+        MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
             .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
             .also { builder ->
-                data.duration?.let {
-                    builder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, it)
-                }
+                duration?.let { builder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, it) }
             }
             .build()
-        session.setMetadata(metadata)
-    }
 
     private fun titleMetadata(data: MediaNotificationData): String =
         data.name ?: strings?.unknownTrack ?: ""
@@ -714,6 +769,8 @@ class SharedMediaSessionManager(
         session.setMetadata(MediaMetadataCompat.Builder().build())
         session.setQueue(emptyList())
         session.isActive = false
+        writtenPlayback = null
+        writtenMetadata = null
     }
 
     /** Reactivate the session and restore the last known playback data. */
@@ -748,6 +805,7 @@ class SharedMediaSessionManager(
             .also { builder -> extras?.let { builder.setExtras(it) } }
             .build()
         session.setPlaybackState(playbackState)
+        writtenPlayback = null
     }
 
     /**

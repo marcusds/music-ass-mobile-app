@@ -43,6 +43,8 @@ Each collection tab (Artists, Albums, Playlists, Podcasts, Audiobooks) exposes f
 - **New** — recently added (or recently *updated* for podcasts).
 - **By name** — alphabetical.
 
+Each sub-list loads one page of at most 300 rows (`AutoLibrary.SUB_LIST_LIMIT`), in the sort of the sub-list, so the head unit gets the list without waiting for the whole library.
+
 **Radio** is a flat list sorted by last played, with a single "Favorites" header at the top.
 
 An opened artist, album, playlist or podcast starts with its bulk-action rows (default **Play all**, **Add all to queue**). The user sets them in *Settings → Car → Item actions*. A plain tap on a playable item runs the per-kind car tap action (default **Play now**). Both come from `CarActionPrefs.kt`.
