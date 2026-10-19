@@ -13,12 +13,14 @@ import io.music_assistant.client.data.model.server.SortWire
 import io.music_assistant.client.utils.myJson
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlin.time.Duration
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 import io.music_assistant.client.data.model.client.items.Track as TrackItem
@@ -54,6 +56,9 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
     @SerialName("command") val command: String,
     @SerialName("args") val args: JsonObject? = null,
     @SerialName("message_id") val messageId: String = Uuid.random().toString(),
+    // How long the client waits for the answer. Null picks the default for the command
+    // (see answerTimeout). Never sent to the server.
+    @Transient val timeout: Duration? = null,
 ) {
     data object Player {
         fun all() = Request(command = APICommands.PLAYERS_ALL)
@@ -219,6 +224,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
                 preAnnounce?.let { put("pre_announce", JsonPrimitive(it)) }
                 volumeLevel?.let { put("volume_level", JsonPrimitive(it)) }
             },
+            timeout = ANNOUNCEMENT_REQUEST_TIMEOUT,
         )
 
         fun ttsEngines() = Request(command = APICommands.PLAYERS_TTS_ENGINES)
