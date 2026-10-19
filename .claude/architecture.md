@@ -231,6 +231,14 @@ actual class PlatformFeature {
   When the network comes back in that time, the connection stays, and the ICE monitor of the manager fails it
   if the path died. `DirectTransport` does not watch the network: the WebSocket ping finds a dead socket.
   The reconnect loops wait for the network before an attempt.
+- `WebRTCTransport` runs every connect and reconnect (ICE failure, forced reconnect, network loss) in one
+  `SerialJobSlot`. A new start cancels the old job and waits until it has ended, so there is one reconnect loop
+  and one `WebRTCConnectionManager` at a time. A replaced manager is always disconnected, uncancellable and
+  bounded to 5 s. `disconnect()` runs that teardown in the parent scope, because `close()` cancels the
+  transport scope at once.
+- A background drop saves `backgroundedConnectionInfo`, and the next foreground reconnects from it. Every new
+  connection and every disconnect clears it (`tearDownTransport`), so a later foreground does not tear down
+  a session that replaced the background one.
 
 ## Artwork Loading
 
