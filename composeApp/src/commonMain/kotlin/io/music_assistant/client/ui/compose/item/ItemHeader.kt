@@ -60,6 +60,7 @@ import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Artist
 import io.music_assistant.client.data.model.client.items.Genre
 import io.music_assistant.client.data.model.client.items.MediaCollection
+import io.music_assistant.client.imageloader.ArtworkSizeClass
 import io.music_assistant.client.imageloader.rememberArtworkRequest
 import io.music_assistant.client.ui.INACTIVE_ALPHA
 import io.music_assistant.client.ui.compose.common.LocalGrantedScopes
@@ -419,7 +420,7 @@ private fun Image(
             RoundedCornerShape(16.dp)
         }
         AsyncImage(
-            model = rememberArtworkRequest(item.image(ImageType.THUMB)?.url),
+            model = rememberArtworkRequest(item.image(ImageType.THUMB)?.url, ArtworkSizeClass.COLOR_SOURCE),
             placeholder = placeholder,
             fallback = placeholder,
             contentDescription = null,
