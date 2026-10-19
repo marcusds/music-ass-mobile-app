@@ -67,6 +67,7 @@ import io.music_assistant.client.ui.compose.common.action.QueueAction
 import io.music_assistant.client.utils.AuthProcessState
 import io.music_assistant.client.utils.DataConnectionState
 import io.music_assistant.client.utils.HasConnectionData
+import io.music_assistant.client.utils.LatestJobs
 import io.music_assistant.client.utils.SessionState
 import io.music_assistant.client.utils.currentTimeMillis
 import io.music_assistant.client.utils.resultAs
@@ -76,6 +77,8 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -179,6 +182,12 @@ class MainDataSource(
 
     private val supervisorJob = SupervisorJob()
     override val coroutineContext: CoroutineContext = supervisorJob + Dispatchers.IO
+
+    /**
+     * One queue-items refresh per player. A refresh pages the whole queue, so two quick queue
+     * events could end in the wrong order and show the older items. The newest refresh wins.
+     */
+    private val queueItemRefreshes = LatestJobs<String>(this)
 
     private val _serverPlayers = MutableStateFlow<DataState<List<Player>>>(DataState.Loading())
     private val _queueInfos = MutableStateFlow<List<QueueInfo>>(emptyList())
@@ -1496,7 +1505,7 @@ class MainDataSource(
                             }
                             (playersData.value as? DataState.Data)?.data?.firstOrNull {
                                 it.queueId == data.id
-                            }?.let { refreshPlayerQueueItems(it, fresh) }
+                            }?.let { refreshPlayerQueueItems(it, fresh, coalesce = true) }
                         }
 
                         is QueueTimeUpdatedEvent -> {
@@ -1754,17 +1763,31 @@ class MainDataSource(
         }
     }
 
+    /**
+     * Loads the queue items of [fullData] and cancels a refresh that is still running for the
+     * same player, so the newest refresh always writes last.
+     *
+     * @param fullData the player whose queue items to load.
+     * @param forcedQueueData the queue to load instead of the queue on [fullData].
+     * @param coalesce wait [QUEUE_EVENT_COALESCE_MS] first, so a burst of queue events (shuffle,
+     *   then reorder, or a radio queue that appends) costs one paged load.
+     */
     private fun refreshPlayerQueueItems(
         fullData: PlayerData,
         forcedQueueData: QueueInfo? = null,
+        coalesce: Boolean = false,
     ) {
-        launch {
+        queueItemRefreshes.launch(fullData.player.id) {
+            if (coalesce) delay(QUEUE_EVENT_COALESCE_MS)
             (forcedQueueData ?: fullData.queueInfo)?.let { queueInfo ->
                 // Paged so a huge queue never exceeds the server's per-message cap. A queue edited
                 // between two pages can duplicate or skip an item until the next queue event.
                 val queueTracks = Request.Queue.items(queueInfo.id)
                     .fetchAllPages { apiClient.sendRequest(it).resultAs<List<ServerQueueItem>>() }
                     ?.let { queueFactory.createTrackList(it) }
+                // A newer refresh replaced this one. A cancelled request can come back as a
+                // failure, which must not overwrite the newer items with an error.
+                ensureActive()
 
                 // Forward to local player repository so external consumers (Android Auto, CarPlay) see items
                 if (fullData.isLocal && queueTracks != null) {
@@ -1818,6 +1841,9 @@ class MainDataSource(
     }
 
     internal companion object {
+        /** How long an event-driven queue refresh waits for more queue events. */
+        private const val QUEUE_EVENT_COALESCE_MS = 250L
+
         /**
          * Resolves the effective selected player from the current state.
          * Pure function; re-evaluates on every input change.
