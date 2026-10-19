@@ -91,7 +91,10 @@ internal fun classifyAuthRoundTrip(
         AuthRoundTrip.NoResponse(
             surfaceAsFailure = !isAutoLogin || budgetReached,
             cause = when (error) {
-                is AuthRoundTripTimeout, is ConnectionLostException -> AuthFailureCause.NO_REPLY
+                is AuthRoundTripTimeout,
+                is RequestTimeoutException,
+                is ConnectionLostException,
+                -> AuthFailureCause.NO_REPLY
                 else -> AuthFailureCause.NOT_SENT
             },
         )

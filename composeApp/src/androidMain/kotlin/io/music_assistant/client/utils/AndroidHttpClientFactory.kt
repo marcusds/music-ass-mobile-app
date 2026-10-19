@@ -14,6 +14,8 @@ import okhttp3.ConnectionPool
 import java.security.KeyStore
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.toJavaDuration
 
 /**
  * OkHttp clients that present the KeyChain certificate [clientCertificateAlias] names
@@ -49,8 +51,16 @@ class AndroidHttpClientFactory(
             config {
                 sslSocketFactory(socketFactory, trustManager)
                 connectionPool(connectionPool)
+                // The OkHttp engine ignores the `pingInterval` of the Ktor WebSockets plugin,
+                // so without this a WebSocket never pings and a dead link is found only by TCP.
+                // OkHttp fails the socket when a pong is not back before the next ping.
+                pingInterval(WEBSOCKET_PING_INTERVAL)
             }
         }
         block()
+    }
+
+    private companion object {
+        val WEBSOCKET_PING_INTERVAL = 20.seconds.toJavaDuration()
     }
 }

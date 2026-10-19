@@ -143,12 +143,30 @@ actual class PlatformFeature {
   again the hints that the client lost. The queue DJ menu (`QueueDjViewModel`) and the stations
   screen show their cache and use only these changes. A show on a queue does not lock the queue DJ.
 
+## RPC Requests
+
+- `ServiceClient.sendRequest` sends a command over the MA WebSocket API (direct) or the WebRTC data channel.
+  It first waits up to 30 s for a ready session (`ensureReadyForCommands`), which covers a reconnect after
+  the app comes back from the background.
+- Every request has an answer timeout (`Request.answerTimeout`, `api/RequestTimeout.kt`). The default is 30 s,
+  `music/search` gets 60 s, and commands that answer only after the player acts (`players/cmd/*`,
+  `play_media`, `play_index`, `transfer`) get 120 s. An announcement gets 5 minutes. Set `Request.timeout`
+  to override it for one request; the field is never sent. A timeout fails only that request with
+  `RequestTimeoutException` and removes its `RpcEngine` callback. It does not close the connection.
+- The connect watchdog ends a stuck `Connecting` after 20 s (direct) or 45 s (WebRTC, whose signaling alone
+  may take 30 s).
+- Callers run on the main thread, so `MediaItemRepository` decodes and maps every answer on
+  `Dispatchers.Default`. Send a list or search request through the repository, not through
+  `sendRequest` plus `resultAs` in a ViewModel.
+
 ## HTTP Clients
 
 - Get every `HttpClient` from the Koin `HttpClientFactory`. Do not call `HttpClient(engine)` directly.
 - Android (`AndroidHttpClientFactory`): OkHttp with the KeyChain client certificate that the user selected
   (`SettingsRepository.clientCertificateAlias`), for mTLS. Trust stays the platform default, so the network
   security config applies. All clients share one connection pool. A certificate change evicts that pool.
+  The OkHttp engine ignores the `pingInterval` of the Ktor WebSockets plugin, so the factory sets the OkHttp
+  WebSocket ping (20 s). OkHttp closes a WebSocket when a pong is not back before the next ping.
 - iOS (`IosHttpClientFactory`): Darwin. `handleChallenge` answers a client-certificate challenge with the identity
   in `KeychainClientIdentity`, only while `clientCertificateAlias` is set. The Darwin engine owns its session pool,
   so `KtorServiceClient` makes a new client when the certificate changes.
@@ -234,7 +252,7 @@ The built-in player is the `:sendspin` Gradle module (`io.music_assistant.sendsp
 - `data/LocalPlayerAdapter` owns the player and everything about the MA player model: optimistic UI, the offline command queue, and server event reconciliation. `LocalPlayerFactory` builds the player from the platform ports (sink, decoders, key store), so a test gives the adapter a fake player (`LocalPlayerAdapterTest`).
 - `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel. A direct session gets the proxied WebSocket at `<wsUrl>/sendspin`, or the custom Sendspin server from settings. A reconnecting MA session keeps the last endpoint.
 - `player/local/` holds the platform sinks and decoders. Android: `AudioTrackSink` and `AndroidDecoderFactory`. iOS: `AudioQueueSink` and pass-through `IosDecoderFactory` (the native player decodes).
-- The control plane stays on the MA REST API. Sendspin carries audio only (role `player@v1`).
+- The control plane stays on the MA WebSocket API (or the WebRTC data channel), through `ServiceClient`. Sendspin carries audio only (role `player@v1`).
 - Only the Noise-encrypted protocol is supported. `supportsEncryptedSendspin(schemaVersion)` requires MA schema 45 or newer. A known lower schema produces `Endpoint.Unsupported`, and the player fails without opening a transport. A missing schema is inconclusive: endpoint selection permits a handshake rather than rejecting the server. An explicit unsupported wire version, and a `server/error` for an unsupported version or suite, fail terminally; network failures and handshake timeouts still retry.
 - The module speaks two wire dialects, `WireVersion` (`api`). `LEGACY_9` is aiosendspin 9.x (server 2.10.6 and older). `SPEC_1_0` is Sendspin spec 1.0.0-rc1, aiosendspin 10.x (server 2.10.7 and 2.11). `sendspinWireFor(schemaVersion, serverVersion)` selects `SPEC_1_0` from `SERVER_2_11_SCHEMA`, or from a 2.10 `server_version` with patch 7 or higher, because 2.10.7 keeps the 2.10 schema. All other servers get `LEGACY_9`, which includes an unknown server and a source build (`0.0.0`). The handshake does not give the server version: `server/init` has `version` 1 on both wires. `LocalPlayerEndpoints` puts the wire on the `Endpoint`, so a wire change restarts the connection. A 10.x server accepts the 9.x wire only while its hidden setting `allow_legacy_clients` is on, and it logs a "non-compliant client" warning for it. The differences on `SPEC_1_0`: Noise message 1 carries `psk_category`, and the client matches the PSK by id and category. On a miss in the initial handshake, the client completes with the Sentinel PSK, so the server can offer re-pairing. `client/hello` has no `trust_level`, no `supported_commands`, and `supported_pair_methods` is an object keyed by method. `client/state` carries `output_delay_ms`, `required_lead_time_ms`, `min_buffer_ms` and `supported_commands`. The player sends it after the first clock estimate and again when the delay changes, never periodically. An audio chunk header has 4 more bytes, `send_ahead`, which the client skips. Fragments use type 1 with a flags byte. A re-handshake has no hello exchange, and an activate without `active_roles` keeps the roles. The Pairing PSK flow sends `client/pair-init` with the pairing index before `client/pair-finalize`. `SendspinJson` omits null fields on both wires. `SendspinDeps.softwareVersion` is the app version that the server names in its logs.
 
