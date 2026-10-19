@@ -31,6 +31,10 @@ import io.music_assistant.client.data.repository.MediaItemRepository
 import io.music_assistant.client.data.repository.favoriteAfter
 import io.music_assistant.client.settings.SettingsRepository
 import io.music_assistant.client.ui.compose.common.DataState
+import io.music_assistant.client.utils.LatestWork
+import io.music_assistant.client.utils.mapChangedOrNull
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -44,6 +48,8 @@ class ItemDetailsViewModel(
     private val itemId: String,
     private val mediaType: MediaType,
     private val providerId: String,
+    // Filter and sort of a long playlist run here, not on the main thread.
+    private val listDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
     data class State(
         val itemState: DataState<AppMediaItem>,
@@ -80,7 +86,9 @@ class ItemDetailsViewModel(
 
     private var rawAlbums: List<Album> = emptyList()
     private var rawPlayableItems: List<PlayableItem> = emptyList()
+    // Null while the list loads, so that nothing publishes the previous list over the spinner.
     private var playableItemsContext: SubItemContext? = null
+    private val playableItemsPublisher = LatestWork(viewModelScope, listDispatcher)
 
     fun onTabSelected(tab: ItemDetailsTab) {
         _state.update { it.copy(userSelectedTab = tab) }
@@ -244,9 +252,8 @@ class ItemDetailsViewModel(
     }
 
     private fun loadAlbumTracks(itemId: String, provider: String) {
+        beginPlayableItemsLoad()
         viewModelScope.launch {
-            _state.update { it.copy(playableItemsState = DataState.Loading()) }
-
             try {
                 val tracks = mediaItemRepository.fetchMediaItems(
                     Request.Album.getTracks(
@@ -270,9 +277,8 @@ class ItemDetailsViewModel(
         provider: String,
         forceRefresh: Boolean = false,
     ) {
+        beginPlayableItemsLoad()
         viewModelScope.launch {
-            _state.update { it.copy(playableItemsState = DataState.Loading()) }
-
             try {
                 val tracks = mediaItemRepository.fetchAllMediaItems(
                     Request.Playlist.getTracks(
@@ -293,9 +299,8 @@ class ItemDetailsViewModel(
     }
 
     private fun loadPodcastEpisodes(itemId: String, provider: String) {
+        beginPlayableItemsLoad()
         viewModelScope.launch {
-            _state.update { it.copy(playableItemsState = DataState.Loading()) }
-
             try {
                 val episodes = mediaItemRepository.fetchAllMediaItems(
                     Request.Podcast.getEpisodes(
@@ -456,6 +461,12 @@ class ItemDetailsViewModel(
         publishPlayableItems()
     }
 
+    private fun beginPlayableItemsLoad() {
+        playableItemsContext = null
+        playableItemsPublisher.cancel()
+        _state.update { it.copy(playableItemsState = DataState.Loading()) }
+    }
+
     private fun setPlayableItems(items: List<PlayableItem>, context: SubItemContext) {
         rawPlayableItems = items
         playableItemsContext = context
@@ -465,15 +476,19 @@ class ItemDetailsViewModel(
     /**
      * Single derivation of the visible list: raw → filter → sort. Every input change (load, sort,
      * query, item update) funnels through here so the three never drift apart.
+     *
+     * The inputs are read on the caller's thread and the work runs on [listDispatcher]. A new call
+     * cancels the previous one, so only the result of the latest inputs reaches the state.
      */
     private fun publishPlayableItems() {
         val context = playableItemsContext ?: return
-        val st = _state.value
-        val sort = st.playableItemsSortOption ?: SortConfig.defaultFor(context)
-        val visible = rawPlayableItems
-            .clientFiltered(st.playableItemsQuery.orEmpty())
-            .clientSorted(sort, context)
-        _state.update { it.copy(playableItemsState = DataState.Data(visible)) }
+        val raw = rawPlayableItems
+        val query = _state.value.playableItemsQuery.orEmpty()
+        val sort = _state.value.playableItemsSortOption ?: SortConfig.defaultFor(context)
+        playableItemsPublisher.run(
+            compute = { raw.clientFiltered(query).clientSorted(sort, context) },
+            deliver = { visible -> _state.update { it.copy(playableItemsState = DataState.Data(visible)) } },
+        )
     }
 
     // Bypasses the server's playlist-tracks cache, which is the only way to make a
@@ -490,42 +505,64 @@ class ItemDetailsViewModel(
         }
     }
 
+    // A change for an item that is not on screen returns before any list work.
     private fun updateSubItemIfNeeded(changed: AppMediaItem, change: MediaItemChange) {
         when (changed) {
             is Artist -> {
                 val artistsData = (_state.value.artistsState as? DataState.Data)?.data ?: return
-                val updated = artistsData.map {
-                    if (it.itemId == changed.itemId) changed.withFavorite(change.favoriteAfter(it.favorite)) else it
-                }
+                val updated = artistsData.mapChangedOrNull { row ->
+                    patchedRow(row, row, change, { changed.withFavorite(it) }, { row.withFavorite(it) })
+                } ?: return
                 _state.update { it.copy(artistsState = DataState.Data(updated)) }
             }
 
             is Album -> {
                 val albumsData = (_state.value.albumsState as? DataState.Data)?.data ?: return
-                val replace = { album: Album ->
-                    if (album.itemId == changed.itemId) {
-                        changed.withFavorite(change.favoriteAfter(album.favorite))
-                    } else {
-                        album
-                    }
+                val patch = { row: Album ->
+                    patchedRow(row, row, change, { changed.withFavorite(it) }, { row.withFavorite(it) })
                 }
-                rawAlbums = rawAlbums.map(replace)
-                _state.update { it.copy(albumsState = DataState.Data(albumsData.map(replace))) }
+                val updated = albumsData.mapChangedOrNull(patch) ?: return
+                rawAlbums = rawAlbums.mapChangedOrNull(patch) ?: rawAlbums
+                _state.update { it.copy(albumsState = DataState.Data(updated)) }
             }
 
             is PlayableItem -> {
-                if (_state.value.playableItemsState !is DataState.Data) return
-                rawPlayableItems = rawPlayableItems.map { existing ->
-                    if (existing.itemId == changed.itemId) {
-                        changed.withFavorite(change.favoriteAfter(existing.favorite))
-                    } else {
-                        existing
-                    }
-                }
+                playableItemsContext ?: return
+                rawPlayableItems = rawPlayableItems.mapChangedOrNull { row ->
+                    (row as? AppMediaItem)?.let { rowItem ->
+                        patchedRow<PlayableItem>(
+                            row,
+                            rowItem,
+                            change,
+                            { changed.withFavorite(it) },
+                            { row.withFavorite(it) },
+                        )
+                    } ?: row
+                } ?: return
                 publishPlayableItems()
             }
 
             else -> Unit
+        }
+    }
+
+    /**
+     * The [row] after [change]. A row with the same key becomes the changed item ([replacement]). A
+     * row that only shares a provider mapping keeps its own id, uri and playlist position, and gets
+     * the new favorite state only ([withFavorite]). Any other row comes back unchanged.
+     */
+    private fun <T> patchedRow(
+        row: T,
+        rowItem: AppMediaItem,
+        change: MediaItemChange,
+        replacement: (Boolean?) -> T,
+        withFavorite: (Boolean?) -> T,
+    ): T {
+        val favorite = change.favoriteAfter(rowItem.favorite)
+        return when {
+            rowItem.hasSameKeyAs(change.item) -> replacement(favorite)
+            !rowItem.hasAnyMappingFrom(change.item) || favorite == rowItem.favorite -> row
+            else -> withFavorite(favorite)
         }
     }
 

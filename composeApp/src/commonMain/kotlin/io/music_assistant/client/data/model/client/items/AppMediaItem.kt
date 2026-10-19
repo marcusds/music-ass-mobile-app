@@ -99,6 +99,17 @@ sealed class AppMediaItem {
     fun hasAnyMappingFrom(other: AppMediaItem): Boolean =
         mappingsHashes.intersect(other.mappingsHashes).isNotEmpty()
 
+    /** True when [other] has the same media type, provider and id. */
+    fun hasSameKeyAs(other: AppMediaItem): Boolean =
+        mediaType == other.mediaType && provider == other.provider && itemId == other.itemId
+
+    /**
+     * True when [other] is the same media item as this one: the same key, or a shared provider
+     * mapping. Use it to find the row that a library change event refers to, because a favorited
+     * provider item comes back under the `library` provider with a new id.
+     */
+    fun matchesIdentityOf(other: AppMediaItem): Boolean = hasSameKeyAs(other) || hasAnyMappingFrom(other)
+
     override fun equals(other: Any?): Boolean {
         return other is AppMediaItem &&
                 itemId == other.itemId &&

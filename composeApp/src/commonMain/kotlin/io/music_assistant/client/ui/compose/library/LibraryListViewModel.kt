@@ -31,6 +31,8 @@ import io.music_assistant.client.ui.compose.common.DataState
 import io.music_assistant.client.ui.compose.common.SelectOption
 import io.music_assistant.client.ui.compose.common.mapData
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,6 +59,13 @@ class LibraryListViewModel(
     providerRepository: ProviderRepository,
 ) : ViewModel() {
     private val searchTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    // True when the next debounced load replaces the list (a new query, sort or filter) and shows
+    // the spinner. A library change leaves it false, so the list stays on screen while it reloads.
+    private var resetOnNextLoad = true
+    private var firstPageJob: Job? = null
+    private var loadMoreJob: Job? = null
+    private var loadMoreAfterRefresh = false
 
     // This VM is recreated on every tab re-enter, so the persisted sort is what makes the
     // choice survive leaving the screen. Null is the list default of the server.
@@ -102,7 +111,9 @@ class LibraryListViewModel(
             searchTrigger
                 .debounce { Timings.INPUT_DEBOUNCE }
                 .collect {
-                    loadFirstPage()
+                    val reset = resetOnNextLoad
+                    resetOnNextLoad = false
+                    loadFirstPage(reset)
                 }
         }
 
@@ -111,7 +122,7 @@ class LibraryListViewModel(
         viewModelScope.launch {
             settingsRepository.libraryFilters(mediaType).collect { filters ->
                 _state.update { it.copy(filters = filters) }
-                searchTrigger.tryEmit(Unit)
+                requestReload(reset = true)
             }
         }
 
@@ -125,16 +136,25 @@ class LibraryListViewModel(
                     is MediaItemChange.Updated,
                     is MediaItemChange.FavoriteUpdated,
                         -> patchItem(change)
-                    // Refetch first page so the new row lands in its sorted/filtered
-                    // position (matches the "page refresh" semantics for creation).
+                    // Refetch the loaded rows so the new row lands in its sorted/filtered
+                    // position. A burst of events gives one reload, and the list stays visible.
                     is MediaItemChange.Added ->
-                        if (change.item.mediaType == mediaType) loadFirstPage()
+                        if (change.item.mediaType == mediaType) requestReload(reset = false)
                     // Cheap in-place removal; ordering of the rest is unaffected.
                     is MediaItemChange.Deleted -> removeItem(change.item)
                 }
             }
         }
 
+        requestReload(reset = true)
+    }
+
+    /**
+     * Asks for a debounced reload of the list. [reset] shows the spinner and starts again from
+     * page 1. Without it, the list stays on screen and the loaded rows are fetched again.
+     */
+    private fun requestReload(reset: Boolean) {
+        resetOnNextLoad = resetOnNextLoad || reset
         searchTrigger.tryEmit(Unit)
     }
 
@@ -163,13 +183,6 @@ class LibraryListViewModel(
             st.copy(dataState = DataState.Data(patched))
         }
     }
-
-    // A favorited non-library item returns from the server re-keyed under the
-    // `library` provider with a new itemId, so fall back to provider-mapping
-    // identity — the convention the other `itemChanges` consumers use.
-    private fun AppMediaItem.matchesIdentityOf(other: AppMediaItem): Boolean =
-        (mediaType == other.mediaType && provider == other.provider && itemId == other.itemId) ||
-            hasAnyMappingFrom(other)
 
     // Persistence is the source of truth (like view mode); the settings flow
     // collector folds the new value back into state and triggers a refetch.
@@ -222,7 +235,7 @@ class LibraryListViewModel(
     }
 
     fun onSearch() {
-        searchTrigger.tryEmit(Unit)
+        requestReload(reset = true)
     }
 
     fun onSearchQueryChanged(query: String) {
@@ -233,14 +246,14 @@ class LibraryListViewModel(
         val grouping = _state.value.seriesGrouping.toggled()
         settingsRepository.setSeriesGrouping(grouping)
         _state.update { it.copy(seriesGrouping = grouping) }
-        searchTrigger.tryEmit(Unit)
+        requestReload(reset = true)
     }
 
     fun onSortChanged(sortOption: SortOption) {
         chosenSort = sortOption
         settingsRepository.setSortOption(mediaType, sortOption)
         _state.update { it.copy(sortOption = sortOption) }
-        searchTrigger.tryEmit(Unit)
+        requestReload(reset = true)
     }
 
     fun loadMore() {
@@ -250,8 +263,14 @@ class LibraryListViewModel(
         if (currentState.isLoadingMore || !currentState.hasMore || currentState.dataState !is DataState.Data) {
             return
         }
+        // A reload of the visible rows is running. Its result replaces the list, so the next page
+        // is fetched after it.
+        if (firstPageJob?.isActive == true) {
+            loadMoreAfterRefresh = true
+            return
+        }
 
-        viewModelScope.launch {
+        loadMoreJob = viewModelScope.launch {
             val searchQuery = currentState.serverSearchQuery()
             val sort = currentState.sortMenu?.sortFor(currentState.sortOption)
 
@@ -262,12 +281,14 @@ class LibraryListViewModel(
             val request = getRequest(
                 this@LibraryListViewModel.mediaType,
                 currentState.offset,
+                PAGE_SIZE,
                 sort,
                 searchQuery,
                 currentState.filters,
                 currentState.seriesGrouping,
             )
             val result = mediaItemRepository.fetchMediaItems(request)
+            ensureActive()
 
             result.getOrNull()
                 ?.let { newItems ->
@@ -294,6 +315,7 @@ class LibraryListViewModel(
     private fun getRequest(
         mediaType: MediaType,
         offset: Int,
+        limit: Int,
         sort: ListSort?,
         searchQuery: String?,
         filters: LibraryFilters,
@@ -304,7 +326,7 @@ class LibraryListViewModel(
         val genres = filters.genres.takeIf { it.isNotEmpty() }
         val request = when (mediaType) {
             MediaType.ARTIST -> Request.Artist.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -315,7 +337,7 @@ class LibraryListViewModel(
             )
 
             MediaType.ALBUM -> Request.Album.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -326,7 +348,7 @@ class LibraryListViewModel(
             )
 
             MediaType.TRACK -> Request.Track.list(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -336,7 +358,7 @@ class LibraryListViewModel(
             )
 
             MediaType.PLAYLIST -> Request.Playlist.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -346,7 +368,7 @@ class LibraryListViewModel(
             )
 
             MediaType.AUDIOBOOK -> Request.Audiobook.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -357,7 +379,7 @@ class LibraryListViewModel(
             )
 
             MediaType.PODCAST -> Request.Podcast.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -367,7 +389,7 @@ class LibraryListViewModel(
             )
 
             MediaType.RADIO -> Request.RadioStation.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -377,7 +399,7 @@ class LibraryListViewModel(
             )
 
             MediaType.GENRE -> Request.Genre.listLibrary(
-                limit = PAGE_SIZE,
+                limit = limit,
                 offset = offset,
                 search = searchQuery,
                 sort = sort,
@@ -429,10 +451,27 @@ class LibraryListViewModel(
     /** The server accepts any non-blank query; both page loaders must agree or later pages leak unfiltered items. */
     private fun State.serverSearchQuery(): String? = searchQuery.takeIf { it.isNotBlank() }
 
-    private fun loadFirstPage() {
-        viewModelScope.launch {
+    /**
+     * Loads the list from the start. With [reset], it shows the spinner and loads one page. Without
+     * it, the current rows stay on screen and the request covers the rows that are loaded already,
+     * so the list keeps its scroll position. A new load cancels the previous one and any page load.
+     */
+    private fun loadFirstPage(reset: Boolean) {
+        val current = _state.value
+        val refresh = !reset && current.dataState is DataState.Data
+        // A page that was loading when the reload started loads again after it.
+        loadMoreAfterRefresh = refresh && (loadMoreAfterRefresh || loadMoreJob?.isActive == true)
+        firstPageJob?.cancel()
+        loadMoreJob?.cancel()
+        val limit = if (refresh) refreshLimit(current.offset, PAGE_SIZE, MAX_REFRESH_ITEMS) else PAGE_SIZE
+        _state.update {
+            it.copy(
+                dataState = if (refresh) it.dataState else DataState.Loading(),
+                isLoadingMore = false,
+            )
+        }
+        firstPageJob = viewModelScope.launch {
             val searchQuery = state.value.serverSearchQuery()
-            updateState(DataState.Loading())
             // Before the request: a 2.11 server rejects a field that the list does not offer.
             val sortMenu = librarySortRepository.menu(mediaType)
             val sortOption = sortMenu.resolve(chosenSort)
@@ -441,12 +480,15 @@ class LibraryListViewModel(
             val request = getRequest(
                 this@LibraryListViewModel.mediaType,
                 0,
+                limit,
                 sortMenu.sortFor(sortOption),
                 searchQuery,
                 state.value.filters,
                 state.value.seriesGrouping,
             )
             val result = mediaItemRepository.fetchMediaItems(request)
+            // A newer load replaced this one while the request ran.
+            ensureActive()
 
             result.getOrNull()
                 // A grouped audiobook listing mixes series rows in with the books.
@@ -454,12 +496,18 @@ class LibraryListViewModel(
                 ?.let { items ->
                     updateStateWithData(
                         items = items,
-                        offset = PAGE_SIZE,
-                        hasMore = items.size >= PAGE_SIZE,
+                        offset = limit,
+                        hasMore = items.size >= limit,
                     )
                 } ?: run {
                 Logger.e("Error loading $mediaType:", result.exceptionOrNull())
-                updateState(DataState.Error())
+                // A failed background reload keeps the rows that are on screen.
+                if (!refresh) updateState(DataState.Error())
+            }
+            firstPageJob = null
+            if (loadMoreAfterRefresh) {
+                loadMoreAfterRefresh = false
+                loadMore()
             }
         }
     }
@@ -491,6 +539,9 @@ class LibraryListViewModel(
 
     companion object Companion {
         private const val PAGE_SIZE = 50
+
+        // A background reload fetches at most this many rows in one request.
+        private const val MAX_REFRESH_ITEMS = 500
         private const val GENRE_OPTIONS_LIMIT = 1000
     }
 
