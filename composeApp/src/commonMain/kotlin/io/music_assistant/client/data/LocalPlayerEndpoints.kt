@@ -16,6 +16,7 @@ import io.music_assistant.client.webrtc.DataChannelWrapper
 import io.music_assistant.sendspin.api.Endpoint
 import io.music_assistant.sendspin.api.Frame
 import io.music_assistant.sendspin.api.SendspinTransport
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,9 +26,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withTimeout
+import kotlin.concurrent.Volatile
 
 /**
  * Derives the Sendspin [Endpoint] from the MA session. The endpoint follows the
@@ -115,29 +118,76 @@ class LocalPlayerEndpoints(
 
     // --- WebRTC: one single-use channel per connection attempt ---
 
+    // The Sendspin supervisor opens one connection at a time, so these need no lock.
+    private val channelPlan = SendspinChannelPlan()
     private var usedChannel: DataChannelWrapper? = null
+    private var lastInBand: DataChannelTransport? = null
 
     private suspend fun openFreshChannel(): SendspinTransport {
-        val current = apiClient.webrtcSendspinChannel
-        val fresh = if (current != null && current !== usedChannel && current.state.value != DataChannelState.Closed) {
-            current
-        } else {
-            log.i { "Sendspin data channel spent; renegotiating WebRTC" }
-            apiClient.forceWebRTCReconnect()
-            withTimeout(CHANNEL_TIMEOUT_MILLIS) {
-                apiClient.sessionState.first {
-                    it is SessionState.Connected.WebRTC && apiClient.webrtcSendspinChannel.let { c -> c != null && c !== current }
-                }
-            }
-            checkNotNull(apiClient.webrtcSendspinChannel)
+        lastInBand?.let { channelPlan.onInBandChannelEnded(it.receivedFrames) }
+        lastInBand = null
+        val negotiated = apiClient.webrtcSendspinChannel
+            ?.takeIf { it !== usedChannel && it.state.value.isUsable() }
+        var inBand: DataChannelWrapper? = null
+        val fresh = when (channelPlan.next(negotiatedUnused = negotiated != null, inBandSupported = inBandSupported())) {
+            SendspinChannelSource.NEGOTIATED -> negotiated
+            SendspinChannelSource.IN_BAND -> openInBandChannel().also { inBand = it }
+            SendspinChannelSource.RENEGOTIATE -> null
+        } ?: renegotiate()
+        val state = withTimeout(CHANNEL_TIMEOUT_MILLIS) {
+            fresh.state.first { it == DataChannelState.Open || it == DataChannelState.Closed }
         }
-        withTimeout(CHANNEL_TIMEOUT_MILLIS) { fresh.state.first { it == DataChannelState.Open } }
+        // The Sendspin supervisor catches this as a failed connect attempt and retries.
+        check(state == DataChannelState.Open) { "Sendspin data channel closed before it opened" }
         usedChannel = fresh
-        return DataChannelTransport(fresh)
+        return DataChannelTransport(fresh).also { transport ->
+            if (fresh === inBand) lastInBand = transport
+        }
+    }
+
+    private fun DataChannelState.isUsable(): Boolean =
+        this == DataChannelState.Connecting || this == DataChannelState.Open
+
+    private fun inBandSupported(): Boolean =
+        (apiClient.sessionState.value as? SessionState.Connected.WebRTC)
+            ?.serverInfo?.schemaVersion
+            ?.let { it >= IN_BAND_SENDSPIN_SCHEMA } == true
+
+    /** A new `sendspin` channel on the live peer connection, or null when it does not open. */
+    private suspend fun openInBandChannel(): DataChannelWrapper? {
+        val channel = try {
+            apiClient.openWebRTCDataChannel(SENDSPIN_CHANNEL_LABEL)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.w(e) { "Could not open a Sendspin data channel in-band" }
+            null
+        }
+        channel?.let { log.i { "Sendspin data channel spent; opened a new one on the live peer connection" } }
+            ?: log.i { "In-band Sendspin data channel did not open" }
+        return channel
+    }
+
+    /** Restarts the peer connection and waits for its negotiated channel. Restarts the API session too. */
+    private suspend fun renegotiate(): DataChannelWrapper {
+        val spent = apiClient.webrtcSendspinChannel
+        log.i { "Sendspin data channel spent; renegotiating WebRTC" }
+        channelPlan.onRenegotiated()
+        apiClient.forceWebRTCReconnect()
+        // The channel is taken in the same step that sees it, so it cannot turn null after the wait.
+        return withTimeout(CHANNEL_TIMEOUT_MILLIS) {
+            apiClient.sessionState
+                .mapNotNull { session ->
+                    apiClient.webrtcSendspinChannel
+                        ?.takeIf { session is SessionState.Connected.WebRTC && it !== spent }
+                }
+                .first()
+        }
     }
 
     private companion object {
         const val CHANNEL_TIMEOUT_MILLIS = 30_000L
+        const val SENDSPIN_CHANNEL_LABEL = "sendspin"
     }
 }
 
@@ -145,8 +195,14 @@ class LocalPlayerEndpoints(
 private class DataChannelTransport(private val wrapper: DataChannelWrapper) : SendspinTransport {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** True once the server sent anything on this channel, which proves it accepted the channel. */
+    @Volatile
+    var receivedFrames = false
+        private set
+
     override val inbound: ReceiveChannel<Frame> = scope.produce(capacity = INBOUND_CAPACITY) {
         wrapper.inbound.collect { message ->
+            receivedFrames = true
             send(
                 when (message) {
                     is DataChannelInbound.Text -> Frame.Text(message.text)
