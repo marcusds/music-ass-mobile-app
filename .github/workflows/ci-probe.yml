@@ -1,0 +1,44 @@
+name: CI probe tests
+
+on:
+  push:
+    branches: [ 'claude/ci-probe-*' ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: chmod +x ./gradlew
+      - name: Run adapter tests repeatedly
+        run: |
+          fails=0
+          for i in $(seq 1 40); do
+            echo "### iteration $i"
+            if ! ./gradlew -q :composeApp:testAndroidHostTest --tests '*LocalPlayerAdapterTest*' --rerun; then
+              fails=$((fails+1))
+              python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for f in glob.glob('composeApp/build/test-results/**/*.xml', recursive=True):
+              try:
+                  r = ET.parse(f).getroot()
+              except Exception:
+                  continue
+              for tc in r.iter('testcase'):
+                  for fl in list(tc.findall('failure')) + list(tc.findall('error')):
+                      print('=====', tc.get('classname'), '>', tc.get('name'))
+                      print('\n'.join(l for l in (fl.text or '').splitlines() if 'LocalPlayerAdapter' in l or 'Exception' in l or 'Error' in l)[:3000])
+          PY
+            fi
+          done
+          echo "### failures: $fails"
+          test $fails -eq 0
