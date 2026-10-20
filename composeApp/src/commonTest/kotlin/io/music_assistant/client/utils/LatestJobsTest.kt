@@ -20,7 +20,7 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class LatestJobsTest {
     @Test
-    fun `a new job for a key cancels the earlier one, so a slow old result is never written`() =
+    fun `a new job for a key cancels the earlier one so a slow old result is never written`() =
         runTest {
             val jobs = LatestJobs<String>(backgroundScope)
             val written = mutableListOf<String>()
@@ -41,8 +41,14 @@ class LatestJobsTest {
         val jobs = LatestJobs<String>(backgroundScope)
         val written = mutableListOf<String>()
 
-        jobs.launch("kitchen") { delay(100); written += "kitchen" }
-        jobs.launch("office") { delay(100); written += "office" }
+        jobs.launch("kitchen") {
+            delay(100)
+            written += "kitchen"
+        }
+        jobs.launch("office") {
+            delay(100)
+            written += "office"
+        }
         settle()
 
         assertEquals(setOf("kitchen", "office"), written.toSet())
@@ -71,11 +77,16 @@ class LatestJobsTest {
     }
 
     @Test
-    fun `a burst keeps only the last job, and a finished key is removed`() = runTest {
+    fun `a burst keeps only the last job and a finished key is removed`() = runTest {
         val jobs = LatestJobs<String>(backgroundScope)
         val written = mutableListOf<Int>()
 
-        repeat(5) { i -> jobs.launch("kitchen") { delay(250); written += i } }
+        repeat(5) { i ->
+            jobs.launch("kitchen") {
+                delay(250)
+                written += i
+            }
+        }
         assertEquals(setOf("kitchen"), jobs.activeKeys)
         settle()
 
