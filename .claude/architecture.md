@@ -94,6 +94,12 @@ actual class PlatformFeature {
   joins it with the server flag `extra_attributes.play_action_in_progress` (any client), and `PlayerControls`
   shows a ring around the main button while it is true. Read the server flag from the server queues, because the
   local player's queue info comes from `LocalPlayerAdapter`.
+- **Endless mix** ("Start endless mix", the radio of other apps: similar music from a seed): set
+  `PlayRequest.endlessMixMode`. The dispatcher picks the wire when it sends (`toPlayMediaRequest`).
+  From schema 35 (`supportsEndlessMixPlaylist`, server 2.10) each seed URI becomes the dynamic playlist
+  `radio_playlist://playlist/<seed uri>`, because the server deprecated `radio_mode`. Server 2.9 and an
+  unknown schema get `radio_mode=true`. Never build either form in a screen. The menus offer it only
+  for items with `canStartEndlessMix` (artist, album, track, non-dynamic playlist).
 - **Favorites**: from server 2.11 (`sendsFavoriteUpdates`), a favorite belongs to one user. The server
   sends null `favorite` in every `media_item_*` event, and sends the state of the user in `favorite_updated`.
   That event has no item body, so `MediaItemRepository` fetches the item and emits
