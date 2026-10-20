@@ -9,18 +9,14 @@ import java.util.concurrent.Executors
 actual val mainDispatcher: CoroutineDispatcher = Dispatchers.Main
 
 /**
- * High-priority audio dispatcher for Android.
- * Uses a single dedicated thread with THREAD_PRIORITY_AUDIO for the playback loop.
+ * High-priority audio dispatcher for Android: one dedicated thread with THREAD_PRIORITY_AUDIO,
+ * which runs the Sendspin scheduler loop and nothing else.
  *
- * ONLY used for the playback loop - reading PCM from buffer and writing to AudioTrack.
- * This is the only operation that needs real-time priority.
- *
- * All other operations use normal priority:
- * - Binary message processing (Dispatchers.Default) - decodes and buffers with headroom
- * - Monitoring, commands, metadata (Dispatchers.Default) - not time-critical
- *
- * This ensures smooth playback even when app is backgrounded while minimizing
- * the number of high-priority threads.
+ * That loop decodes each chunk right before it writes it to the AudioTrack: the decoder and the
+ * sink handle have a single owner. A MediaCodec FLAC decode can block this thread for over
+ * 100 ms (input retries plus the output wait in `AndroidDecoders`); the AudioTrack buffer in
+ * `AudioTrackSink` is sized to play through such a stall. Networking, message parsing, the
+ * jitter buffer, and commands run on normal-priority dispatchers.
  */
 actual val audioDispatcher: CoroutineDispatcher = Executors.newSingleThreadExecutor { runnable ->
     Thread({
