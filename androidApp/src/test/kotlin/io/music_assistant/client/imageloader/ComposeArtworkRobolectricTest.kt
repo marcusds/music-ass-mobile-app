@@ -72,7 +72,7 @@ class ComposeArtworkRobolectricTest {
                 .size(48.dp)
                 .testTag(TAG)
                 .semantics { contentDescription = if (loaded) "artwork-loaded-from-repository" else "artwork-loading" },
-            model = rememberArtworkRequest(model),
+            model = rememberArtworkRequest(model, ArtworkSizeClass.COLOR_SOURCE),
             contentDescription = null,
             contentScale = ContentScale.FillBounds,
             onSuccess = { onSuccess() },
