@@ -161,9 +161,22 @@ class LocalPlayerAdapter(
     private val held = MutableStateFlow(false)
     private val outputHeld: Boolean get() = held.value
 
+    /**
+     * Bumped after every write of [held] and [starvedResumePending]. Each bump is a new value,
+     * so [wantsSession] always reads them again after the last write, even when a flag flips
+     * and flips back before a collector of the flag itself would see it.
+     */
+    private val sessionFlagsVersion = MutableStateFlow(0L)
+
     private fun hold(held: Boolean) {
         this.held.value = held
+        sessionFlagsVersion.update { it + 1 }
         player.hold(held)
+    }
+
+    private fun setStarvedResumePending(pending: Boolean) {
+        starvedResumePending.value = pending
+        sessionFlagsVersion.update { it + 1 }
     }
 
     /**
@@ -172,11 +185,12 @@ class LocalPlayerAdapter(
      * so the MA session must keep reconnecting instead of being torn down in the background.
      * A stop forced by an empty buffer during an outage is such a pause, like a user's, and
      * the session stays wanted while that stop may still resume on its own.
-     * The sources are read live: `combine` can pair a new value of one with a stale value of
-     * the other, and a local pause (hold first, then not playing) would read as a short false.
+     * The flags are read live: a local pause sets the hold before it clears "playing", so a
+     * collected hold that lags the player data would read as a short false. A flag write
+     * bumps [sessionFlagsVersion], so the value is computed again after the last write.
      */
-    val wantsSession: StateFlow<Boolean> = combine(_localPlayerData, held, starvedResumePending) { _, _, _ ->
-        _localPlayerData.value?.let { it.player.isPlaying || held.value || starvedResumePending.value } == true
+    val wantsSession: StateFlow<Boolean> = combine(_localPlayerData, sessionFlagsVersion) { data, _ ->
+        data?.let { it.player.isPlaying || held.value || starvedResumePending.value } == true
     }.stateIn(this, SharingStarted.Eagerly, false)
 
     init {
@@ -352,7 +366,7 @@ class LocalPlayerAdapter(
      */
     private fun armStarvedResume() {
         starvedResumeJob?.cancel()
-        starvedResumePending.value = true
+        setStarvedResumePending(true)
         // Undispatched, so the wait reads the link state now: a link that comes back before a
         // dispatched start would read as the stale Connected from before the outage.
         starvedResumeJob = launch(start = CoroutineStart.UNDISPATCHED) {
@@ -362,7 +376,7 @@ class LocalPlayerAdapter(
                 apiClient.isReadyForCommands.first { it }
             } != null
             ensureActive() // a pause that cancelled the wait as it ended still wins
-            starvedResumePending.value = false
+            setStarvedResumePending(false)
             when {
                 !linkBack -> log.i { "Audio link not back within the grace window: staying paused" }
                 else -> localPlayerData.value?.let {
@@ -376,7 +390,7 @@ class LocalPlayerAdapter(
     private fun cancelStarvedResume() {
         starvedResumeJob?.cancel()
         starvedResumeJob = null
-        starvedResumePending.value = false
+        setStarvedResumePending(false)
     }
 
     /** Platform remote command (Control Center, lock screen, CarPlay). */
