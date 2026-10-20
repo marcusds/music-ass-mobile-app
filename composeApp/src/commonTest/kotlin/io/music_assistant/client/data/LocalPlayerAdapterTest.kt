@@ -83,14 +83,53 @@ class LocalPlayerAdapterTest {
     @Test
     fun theServerConfirmingThePauseReleasesTheHoldAndTheSession() = runBlocking<Unit> {
         val local = playing()
-        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.sent.receive().command)
+        assertTrue(player.held.value)
 
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
 
         await { player.held.value.takeUnless { it } }
         await { adapter.wantsSession.value.takeUnless { it } }
         assertFalse(adapter.wantsSession.value)
+    }
+
+    @Test
+    fun theServerConfirmingAStarvedPauseReleasesTheHoldButKeepsTheSessionForTheResume() = runBlocking<Unit> {
+        val local = playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        assertEquals(PAUSE, client.sent.receive().command)
+
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+
+        await { player.held.value.takeUnless { it } }
+        // The resume after the outage still needs the session.
+        assertTrue(adapter.wantsSession.value)
+
+        // The hold is gone, so the resume is a plain play.
+        linkUp()
+        assertEquals(PLAY, client.sent.receive().command)
+    }
+
+    @Test
+    fun aUserPauseAfterAConfirmedStarvedPauseReleasesTheSession() = runBlocking<Unit> {
+        val local = playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        client.sent.receive()
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+        await { player.held.value.takeUnless { it } }
+
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.sent.receive().command)
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+
+        await { adapter.wantsSession.value.takeUnless { it } }
+        assertFalse(adapter.wantsSession.value)
+        linkUp()
+        delay(SETTLE_MS)
+        assertTrue(client.sent.tryReceive().isFailure)
     }
 
     @Test
