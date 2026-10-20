@@ -235,7 +235,12 @@ class LocalPlayerAdapter(
                 // comes back within the grace window (see [armStarvedResume]).
                 StopCause.Starved -> {
                     log.w { "Playback stopped: buffer ran dry while disconnected" }
-                    if (pauseLocalIfPlaying()) armStarvedResume()
+                    // Arm before the pause leaves: a user pause that follows it must find the
+                    // resume to cancel, and the wait must start before the audio link returns.
+                    localPlayerData.value?.takeIf { it.player.isPlaying }?.let {
+                        armStarvedResume()
+                        dispatchLocalCommand(it, PlayerAction.Pause)
+                    }
                 }
 
                 StopCause.FocusLost -> {
@@ -620,10 +625,9 @@ class LocalPlayerAdapter(
         }
     }
 
-    /** Returns true when the player was playing and the pause went out. */
-    private fun pauseLocalIfPlaying(): Boolean =
-        localPlayerData.value?.takeIf { it.player.isPlaying }
-            ?.let { handleLocalCommand(it, PlayerAction.Pause) } != null
+    private fun pauseLocalIfPlaying() {
+        localPlayerData.value?.takeIf { it.player.isPlaying }?.let { handleLocalCommand(it, PlayerAction.Pause) }
+    }
 
     private fun PlayerData.withNowPlayingFallback(): PlayerData {
         if (player.currentMedia?.title?.isNotBlank() == true) return this
