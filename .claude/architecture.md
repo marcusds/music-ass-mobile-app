@@ -213,6 +213,13 @@ actual class PlatformFeature {
 - Use `remember`/`derivedStateOf` for computed values
 - Split large composables into smaller files by meaning
 - Previews only when explicitly requested
+- Read fast-changing values in the smallest composable that shows them. The live position and the
+  buffer level tick every 500 ms, so only `PlayerTimeline` reads them in the full player, and
+  `FullPlayerItem` derives the chapter with `derivedStateOf`. `MainNavigationRoot` reads
+  `playersState` only in lambdas, effects and derived states, and keys the pager sync on the
+  selected index and the player ids.
+- Do not use `PlayerData` as a map key or a `remember` key in a loop. It holds the whole queue, so
+  its hash is expensive. Key by `playerId`, and wrap a `remember` in a loop in `key(playerId)`.
 
 ## State Management
 
@@ -275,6 +282,10 @@ The built-in player is the `:sendspin` Gradle module (`io.music_assistant.sendsp
 
 **App side** (`composeApp`):
 - `data/LocalPlayerAdapter` owns the player and everything about the MA player model: optimistic UI, the offline command queue, and server event reconciliation. `LocalPlayerFactory` builds the player from the platform ports (sink, decoders, key store), so a test gives the adapter a fake player (`LocalPlayerAdapterTest`).
+- The UI gets `MainDataSource.sendspinState` as `LocalPlayerStatus` (`data/LocalPlayerStatus.kt`), not as
+  `PlayerState`. The player publishes a new `PlayerState` after each audio chunk with a new `bufferedMs`,
+  and the full state would rebuild the player UI many times a second. The buffer band reads
+  `localBufferedSeconds`, sampled at 500 ms.
 - `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel.
   A channel serves one Sendspin connection. The `sendspin` channel that is negotiated with the peer connection
   serves the first one. From schema 49 (`IN_BAND_SENDSPIN_SCHEMA`), a Sendspin reconnect opens a new `sendspin`

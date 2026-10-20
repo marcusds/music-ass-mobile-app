@@ -29,12 +29,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -152,25 +154,36 @@ fun MainNavigationRoot(
         }
     }
 
-    val playersState by homeScreenViewModel.playersState.collectAsStateWithLifecycle()
+    // The players state changes with every player update. Read it only in lambdas, effects and
+    // derived states: a read in this scope would recompose the whole app UI each time.
+    val playersState = homeScreenViewModel.playersState.collectAsStateWithLifecycle()
+    val currentPlayersData = { playersState.value as? HomeScreenViewModel.PlayersState.Data }
     // Single pager state used across all views
-    val data = playersState as? HomeScreenViewModel.PlayersState.Data
     val playerPagerState = rememberPagerState(
-        initialPage = data?.selectedPlayerIndex ?: 0,
-        pageCount = { data?.playerData?.size ?: 0 },
+        initialPage = Snapshot.withoutReadObservation { currentPlayersData()?.selectedPlayerIndex ?: 0 },
+        pageCount = { currentPlayersData()?.playerData?.size ?: 0 },
     )
+
+    // Only a new selection or a new page list moves the pager. A restart on every player update
+    // would scroll the pager back to the selection while a swipe settles.
+    val pagerSync by remember {
+        derivedStateOf {
+            currentPlayersData()?.let { data ->
+                data.selectedPlayerIndex to data.playerData.map { it.playerId }
+            }
+        }
+    }
 
     // Bidirectional pager <-> selection sync
     // Selection→pager runs first (data layer priority), then pager→selection watches user swipes
-    LaunchedEffect(playerPagerState, playersState) {
-        val currentData = playersState as? HomeScreenViewModel.PlayersState.Data
-            ?: return@LaunchedEffect
-        val target = currentData.selectedPlayerIndex ?: return@LaunchedEffect
+    LaunchedEffect(playerPagerState, pagerSync) {
+        val target = pagerSync?.first ?: return@LaunchedEffect
         if (!playerPagerState.isScrollInProgress) {
             playerPagerState.animateScrollToPage(target)
         }
 
         snapshotFlow { playerPagerState.settledPage }.collect { currentPage ->
+            val currentData = currentPlayersData() ?: return@collect
             currentData.playerData.getOrNull(currentPage)
                 // Only a swipe to another player is a user choice. Re-writing the page the
                 // scroll above just landed on would persist the resolver's fallback (first
@@ -245,14 +258,15 @@ fun MainNavigationRoot(
     val searchScreenState = remember { mutableStateOf<SearchScreenState?>(null) }
 
     val remoteVolumeHint = stringResource(Res.string.players_remote_volume_hint)
-    val viewingRemote = data?.selectedPlayer?.isLocal == false
+    val viewingRemote by remember {
+        derivedStateOf { currentPlayersData()?.selectedPlayer?.isLocal == false }
+    }
     val currentHint by rememberUpdatedState(remoteVolumeHint)
-    val observingRemote by rememberUpdatedState(viewingRemote)
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner, volumeButtonService) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             volumeButtonService.buttonPresses.collect {
-                if (observingRemote) {
+                if (viewingRemote) {
                     toastState.showToast(currentHint, ToastDuration.SHORT)
                 }
             }
@@ -312,7 +326,7 @@ fun MainNavigationRoot(
                             content = { expanded, contentPadding ->
                                 PlayersPager(
                                     playerPagerState = playerPagerState,
-                                    state = playersState,
+                                    state = playersState.value,
                                     homeScreenViewModel = homeScreenViewModel,
                                     actionsViewModel = playerActionsViewModel,
                                     dspSettingsViewModel = dspSettingsViewModel,

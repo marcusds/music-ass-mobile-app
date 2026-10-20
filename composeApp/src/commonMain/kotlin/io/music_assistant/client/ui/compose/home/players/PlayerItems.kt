@@ -1,10 +1,8 @@
 package io.music_assistant.client.ui.compose.home.players
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
@@ -29,22 +26,15 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
@@ -56,15 +46,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import io.music_assistant.client.data.LocalPlayerStatus
 import io.music_assistant.client.data.model.client.Player
 import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.PlayerDataFixtures
 import io.music_assistant.client.data.model.client.QualityTier
-import io.music_assistant.client.data.model.client.ResolvedChapter
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Audiobook
 import io.music_assistant.client.data.model.client.items.PodcastEpisode
@@ -72,11 +61,9 @@ import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.model.client.items.canBeFavorited
 import io.music_assistant.client.data.model.client.presentationChapter
 import io.music_assistant.client.data.model.client.qualityTier
-import io.music_assistant.client.data.model.client.toAbsoluteSeekSeconds
 import io.music_assistant.client.imageloader.ArtworkSizeClass
 import io.music_assistant.client.imageloader.rememberArtworkRequest
 import io.music_assistant.client.ui.alphaOn
-import io.music_assistant.client.ui.compose.common.CenteredThreeSlotRow
 import io.music_assistant.client.ui.compose.common.PlayerColors
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.ui.compose.common.icons.AlbumIcon
@@ -86,8 +73,6 @@ import io.music_assistant.client.ui.compose.common.painters.rememberPlaceholderP
 import io.music_assistant.client.ui.fadingEdges
 import io.music_assistant.client.ui.inactive
 import io.music_assistant.client.ui.theme.favoriteTint
-import io.music_assistant.client.utils.formatDuration
-import io.music_assistant.sendspin.api.PlayerState
 import kotlinx.coroutines.flow.Flow
 import musicassistantclient.composeapp.generated.resources.Res
 import musicassistantclient.composeapp.generated.resources.action_go_to_artist
@@ -102,14 +87,6 @@ import musicassistantclient.composeapp.generated.resources.player_standby
 import musicassistantclient.composeapp.generated.resources.players_nothing
 import musicassistantclient.composeapp.generated.resources.queue_cannot_play
 import org.jetbrains.compose.resources.stringResource
-import kotlin.time.DurationUnit
-
-private const val SEEK_STICK_EPSILON_SECONDS = 0.5f
-
-// Buffered-ahead band uses the slider's own control tint, one alpha, no health tint. Sits just
-// above the inactive track (0.4) so the buffered region reads a touch more opaque than "not yet
-// buffered" without introducing a second color.
-private const val BUFFER_TRACK_ALPHA = 0.45f
 
 @Composable
 fun CompactPlayerItem(
@@ -120,7 +97,7 @@ fun CompactPlayerItem(
     onSelectPlayer: (() -> Unit)? = null,
     onGroupButton: (() -> Unit)? = null,
     showAdditionalControls: Boolean = false,
-    sendSpinState: PlayerState?,
+    sendSpinState: LocalPlayerStatus?,
     // Server preference gate for chapter-based Next enablement and the chapter subtitle.
     chapterProgressEnabled: Boolean = true,
     livePositionFlow: Flow<Double>? = null,
@@ -376,28 +353,23 @@ fun FullPlayerItem(
         // Powered off: present the "no media" state — disabled slider, empty time labels.
         val duration = if (poweredOff) null else currentMedia?.duration?.takeIf { it > 0 }?.toFloat()
 
-        // Live position from PlayerPositionTracker — single source of truth shared
-        // with notification + Android Auto. Recomposition scope is limited to this
-        // slider; the marquee/art/controls only recompose on real state changes.
-        val displayPosition = livePositionFlow
+        // Live position from PlayerPositionTracker — single source of truth shared with
+        // notification + Android Auto. Only PlayerTimeline and the derived chapter below read
+        // it, so the position tick does not recompose the art, title and controls.
+        val positionState = livePositionFlow
             ?.collectAsStateWithLifecycle(initialValue = item.queueInfo?.elapsedTime ?: 0.0)
-            ?.value?.toFloat()
-            ?: item.queueInfo?.elapsedTime?.toFloat()
-            ?: 0f
 
         // Chapter presentation maps the slider/subtitle to the active chapter.
         // Domain positions, seeks, and tracker values remain absolute.
-        val currentChapter = if (chapterProgressEnabled && !poweredOff) {
-            item.presentationChapter(displayPosition.toDouble())
-        } else {
-            null
+        // Derived so the position tick recomposes this item only at chapter boundaries.
+        val currentChapter by remember(item, chapterProgressEnabled, poweredOff, positionState) {
+            derivedStateOf {
+                item.takeIf { chapterProgressEnabled && !poweredOff }
+                    ?.presentationChapter(positionState?.value ?: item.queueInfo?.elapsedTime ?: 0.0)
+            }
         }
-        val timelineDuration = currentChapter?.duration?.toFloat() ?: duration
-        val timelinePosition =
-            currentChapter?.relativeSec(displayPosition.toDouble())?.toFloat() ?: displayPosition
 
         // The artist line does the overflow's "Go to artist"; a chapter name in that line has no artist.
-        // Remembered: the position tick recomposes this item several times a second.
         val artists = (item.queueInfo?.currentItem?.track as? Track)
             ?.takeIf { !poweredOff && currentChapter == null }
             ?.artists.orEmpty()
@@ -481,246 +453,90 @@ fun FullPlayerItem(
             }
         }
 
-        // Buffered-ahead seconds (local player only; null → 0 for remote/preview).
-        val bufferedAheadSec = bufferedAheadSecFlow
-            ?.collectAsStateWithLifecycle(initialValue = 0.0)?.value?.toFloat() ?: 0f
+        val currentQueueItem = item.queueInfo?.currentItem
+        val tier = currentQueueItem?.qualityTier
+        val isLq = tier == QualityTier.LQ
 
-        // Hold the released absolute seek until the tracker publishes its frozen anchor.
-        // Drag values are timeline-relative; convert the latch for display so it reconciles
-        // even when the seek lands in another chapter.
-        var userDragPosition by remember { mutableStateOf<Float?>(null) }
-        var releasedSeekPosition by remember { mutableStateOf<Float?>(null) }
-        // Latch the chapter at drag start so boundary crossings cannot shift the thumb.
-        // It outlives the gesture: the released latch is an absolute position in THIS
-        // chapter, and [currentChapter] may already have moved on to the next one.
-        var dragChapter by remember { mutableStateOf<ResolvedChapter?>(null) }
+        // Variable speed: server-supported only for audiobooks/podcasts, and only
+        // when the queue payload carries `playback_speed` (feature-detect gate).
+        val playbackSpeed = item.queueInfo?.playbackSpeed
+        val isSpokenContent = currentQueueItem?.track is Audiobook ||
+                currentQueueItem?.track is PodcastEpisode
+        val showSpeed = isSpokenContent && playbackSpeed != null && !poweredOff
+        val onAmbientSound = onAmbientSoundClick
+            ?.takeIf { item.queueInfo?.overlay?.enabled == true && !poweredOff }
 
-        // A queue-item change mid-drag (track end, Next from another controller)
-        // invalidates the gesture: a release would seek the NEW item to the OLD
-        // item's coordinates. Cancel the drag and drop the released-seek latch
-        // (mirrors the web frontend clearing its pending seek on item change).
-        LaunchedEffect(item.queueInfo?.currentItem?.id) {
-            userDragPosition = null
-            releasedSeekPosition = null
-            dragChapter = null
-        }
-
-        LaunchedEffect(displayPosition, releasedSeekPosition) {
-            val released = releasedSeekPosition ?: return@LaunchedEffect
-            if (kotlin.math.abs(displayPosition - released) < SEEK_STICK_EPSILON_SECONDS) {
-                releasedSeekPosition = null
-                dragChapter = null
-            }
-        }
-
-        val sliderPosition = when {
-            poweredOff -> 0f
-            else ->
-                userDragPosition
-                ?: releasedSeekPosition?.let { released ->
-                    dragChapter?.relativeSec(released.toDouble())?.toFloat() ?: released
-                }
-                ?: timelinePosition
-        }
-
-        val progressSliderColors = SliderDefaults.colors().copy(
-            thumbColor = controlTint,
-            activeTrackColor = controlTint,
-            inactiveTrackColor = controlTint.inactive(),
-        )
-        Column(
+        PlayerTimeline(
             modifier = Modifier.fillMaxWidth().padding(horizontal = FULL_PLAYER_HORIZONTAL_PADDING),
-        ) {
-            Slider(
-                value = sliderPosition,
-                valueRange = timelineDuration?.let { 0f..it } ?: 0f..1f,
-                enabled = displayPosition.takeIf { timelineDuration != null } != null,
-                onValueChange = {
-                    if (userDragPosition == null) dragChapter = currentChapter
-                    userDragPosition = it  // Track drag position locally
-                },
-                onValueChangeFinished = {
-                    userDragPosition?.let { seekPos ->
-                        // Convert the latched chapter-relative value to an absolute,
-                        // whole-second target to match server/tracker state.
-                        val seekSeconds = dragChapter.toAbsoluteSeekSeconds(seekPos.toDouble())
-                        releasedSeekPosition = seekSeconds.toFloat()
-                        playerAction(item, PlayerAction.SeekTo(seekSeconds))
-                        userDragPosition = null  // Clear drag state
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                thumb = {
-                    sliderPosition.takeIf { timelineDuration != null }?.let {
-                        SliderDefaults.Thumb(
-                            interactionSource = remember { MutableInteractionSource() },
-                            thumbSize = DpSize(16.dp, 16.dp),
-                            colors = progressSliderColors,
-                        )
-                    }
-                },
-                track = { sliderState ->
-                    val audiobook = item.queueInfo?.currentItem?.track as? Audiobook
-                    val chapters = audiobook?.chapters
-                    // Square inside corners leave a full or empty track, and the buffered band,
-                    // with a square outer end; the clip keeps both ends round.
-                    Box(modifier = Modifier.clip(CircleShape)) {
-                        SliderDefaults.Track(
-                            sliderState = sliderState,
-                            colors = progressSliderColors,
-                            thumbTrackGapSize = 0.dp,
-                            trackInsideCornerSize = 0.dp,
-                            drawStopIndicator = null,
-                            enabled = currentMedia != null && !item.player.isAnnouncing && !poweredOff,
-                            modifier = Modifier.height(8.dp),
-                        )
-                        // Buffered-ahead highlight — the region between the real playhead and
-                        // the buffered point, at an alpha between the inactive (0.4) and active
-                        // (1.0) track. Local player with audio buffered ahead; shown while paused
-                        // too (pause keeps the buffer — only a genuine stop zeroes bufferedAhead).
-                        if (item.isLocal &&
-                            timelineDuration != null && timelineDuration > 0f && bufferedAheadSec > 0f
+            item = item,
+            positionState = positionState,
+            bufferedAheadSecFlow = bufferedAheadSecFlow,
+            currentChapter = currentChapter,
+            duration = duration,
+            controlTint = controlTint,
+            playerAction = playerAction,
+            center = {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (showSpeed) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(colors.controlTint)
+                                .clickable(onClick = onPlaybackSpeedClick)
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
                         ) {
-                            val playheadFraction =
-                                (timelinePosition / timelineDuration).coerceIn(0f, 1f)
-                            val bufferedFraction =
-                                ((timelinePosition + bufferedAheadSec) / timelineDuration)
-                                    .coerceIn(0f, 1f)
-                            // Same hue as the slider itself, just a touch more opaque than the
-                            // inactive track — a subtle "already buffered" band, no health tint.
-                            val bufferedColor = controlTint.copy(alpha = BUFFER_TRACK_ALPHA)
-                            Canvas(modifier = Modifier.fillMaxWidth().height(8.dp)) {
-                                val startX = playheadFraction * size.width
-                                val endX = bufferedFraction * size.width
-                                if (endX > startX) {
-                                    drawRect(
-                                        color = bufferedColor,
-                                        topLeft = Offset(startX, 0f),
-                                        size = Size(endX - startX, size.height),
-                                    )
-                                }
-                            }
+                            Text(
+                                text = "${formatDecimal(snapSpeed(playbackSpeed), 2)}x",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (colors.controlTint.luminance() > 0.5f) {
+                                    Color.Black
+                                } else {
+                                    Color.White
+                                },
+                            )
                         }
-                        // Chapter ticks use absolute starts, so show them only on the full-book timeline.
-                        if (currentChapter == null &&
-                            !chapters.isNullOrEmpty() && duration != null && duration > 0f
+                    } else if ((tier != null && !poweredOff) || onAmbientSound == null) {
+                        // A hidden badge stays as an invisible placeholder that keeps the
+                        // slot height, unless the ambient pill holds the slot by itself.
+                        Box(
+                            modifier = Modifier
+                                .alpha(if (tier != null && !poweredOff) 1f else 0f)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(
+                                    if (isLq) {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    } else {
+                                        colors.controlTint
+                                    },
+                                )
+                                .clickable(enabled = tier != null, onClick = onAudioChainClick)
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
                         ) {
-                            val tickColor =
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            Canvas(modifier = Modifier.fillMaxWidth().height(8.dp)) {
-                                chapters.drop(1).forEach { chapter ->
-                                    val fraction =
-                                        (chapter.start.toFloat() / duration).coerceIn(0f, 1f)
-                                    val x = fraction * size.width
-                                    drawLine(
-                                        color = tickColor,
-                                        start = Offset(x, 0f),
-                                        end = Offset(x, size.height),
-                                        strokeWidth = 2.dp.toPx(),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                },
-            )
-
-            // Duration labels
-            val currentQueueItem = item.queueInfo?.currentItem
-            val tier = currentQueueItem?.qualityTier
-            val isLq = tier == QualityTier.LQ
-
-            // Variable speed: server-supported only for audiobooks/podcasts, and only
-            // when the queue payload carries `playback_speed` (feature-detect gate).
-            val playbackSpeed = item.queueInfo?.playbackSpeed
-            val isSpokenContent = currentQueueItem?.track is Audiobook ||
-                    currentQueueItem?.track is PodcastEpisode
-            val showSpeed = isSpokenContent && playbackSpeed != null && !poweredOff
-            val onAmbientSound = onAmbientSoundClick
-                ?.takeIf { item.queueInfo?.overlay?.enabled == true && !poweredOff }
-
-            CenteredThreeSlotRow(
-                modifier = Modifier.fillMaxWidth(),
-                start = {
-                    Text(
-                        text = sliderPosition.takeIf { currentMedia != null }
-                            .formatDuration(DurationUnit.SECONDS)
-                            .takeIf { timelineDuration != null } ?: "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-                center = {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (showSpeed) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(colors.controlTint)
-                                    .clickable(onClick = onPlaybackSpeedClick)
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                            ) {
-                                Text(
-                                    text = "${formatDecimal(snapSpeed(playbackSpeed), 2)}x",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (colors.controlTint.luminance() > 0.5f) {
+                            Text(
+                                text = (tier ?: QualityTier.LQ).name,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isLq) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    if (colors.controlTint.luminance() > 0.5f) {
                                         Color.Black
                                     } else {
                                         Color.White
-                                    },
-                                )
-                            }
-                        } else if ((tier != null && !poweredOff) || onAmbientSound == null) {
-                            // A hidden badge stays as an invisible placeholder that keeps the
-                            // slot height, unless the ambient pill holds the slot by itself.
-                            Box(
-                                modifier = Modifier
-                                    .alpha(if (tier != null && !poweredOff) 1f else 0f)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(
-                                        if (isLq) {
-                                            MaterialTheme.colorScheme.surfaceVariant
-                                        } else {
-                                            colors.controlTint
-                                        },
-                                    )
-                                    .clickable(enabled = tier != null, onClick = onAudioChainClick)
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                            ) {
-                                Text(
-                                    text = (tier ?: QualityTier.LQ).name,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isLq) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    } else {
-                                        if (colors.controlTint.luminance() > 0.5f) {
-                                            Color.Black
-                                        } else {
-                                            Color.White
-                                        }
-                                    },
-                                )
-                            }
+                                    }
+                                },
+                            )
                         }
-                        onAmbientSound?.let { AmbientSoundPill(tint = colors.controlTint, onClick = it) }
                     }
-                },
-                end = {
-                    Text(
-                        text = currentMedia.takeUnless { poweredOff }
-                            ?.let { timelineDuration?.formatDuration(DurationUnit.SECONDS) ?: "\u221E" }
-                            ?: "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-            )
-        }
+                    onAmbientSound?.let { AmbientSoundPill(tint = colors.controlTint, onClick = it) }
+                }
+            },
+        )
+
 
         // Powered off: favorite + transport controls give way to a single power-on button,
         // sized to match the play/pause control.
