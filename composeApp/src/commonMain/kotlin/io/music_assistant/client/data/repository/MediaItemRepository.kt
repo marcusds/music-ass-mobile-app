@@ -1,6 +1,7 @@
 package io.music_assistant.client.data.repository
 
 import co.touchlab.kermit.Logger
+import io.music_assistant.client.api.Answer
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
 import io.music_assistant.client.api.fetchAllPages
@@ -19,6 +20,7 @@ import io.music_assistant.client.data.model.server.sendsFavoriteUpdates
 import io.music_assistant.client.ui.compose.common.getOrEmptyList
 import io.music_assistant.client.utils.HasConnectionData
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -63,6 +65,9 @@ interface MediaItemRepository {
 class ServiceClientMediaItemRepository(
     private val apiClient: ServiceClient,
     private val factory: MediaItemFactory,
+    // Callers sit on the main thread (viewModelScope). A search or library page decodes and
+    // maps hundreds of items, so that work runs here and never on the caller's dispatcher.
+    private val decodeDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : MediaItemRepository {
     // Singleton-scoped app-lifetime job; only used to keep [itemChanges]
     // hot. Survives subscriber turnover so quick navigation between screens
@@ -75,7 +80,7 @@ class ServiceClientMediaItemRepository(
      * failed [Result] so callers can still log via `result.exceptionOrNull()`.
      */
     override suspend fun fetchMediaItems(request: Request): Result<List<AppMediaItem>> =
-        apiClient.sendRequest(request).mapCatching { answer ->
+        sendAndDecode(request) { answer ->
             answer.resultAs<List<ServerMediaItem>>()
                 ?.let(factory::createList)
                 ?: error("Missing or undecodable media list payload")
@@ -101,17 +106,35 @@ class ServiceClientMediaItemRepository(
      * "not found" stays distinguishable from a transport failure.
      */
     override suspend fun fetchMediaItem(request: Request): Result<AppMediaItem?> =
-        apiClient.sendRequest(request).map { answer ->
+        sendAndDecode(request) { answer ->
             answer.resultAs<ServerMediaItem>()?.let(factory::create)
         }
 
     /** Issue [request] and decode its payload as a typed [SearchResultData]. */
     override suspend fun search(request: Request): Result<SearchResultData> =
-        apiClient.sendRequest(request).mapCatching { answer ->
+        sendAndDecode(request) { answer ->
             answer.resultAs<SearchResult>()
                 ?.let(factory::createSearchResult)
                 ?: error("Missing or undecodable search payload")
         }
+
+    // A decode failure becomes a failed Result. Cancellation of the caller is rethrown,
+    // so a superseded search stops here instead of returning a stale result.
+    private suspend fun <T> sendAndDecode(
+        request: Request,
+        decode: (Answer) -> T,
+    ): Result<T> {
+        val answer = apiClient.sendRequest(request).getOrElse { return Result.failure(it) }
+        return withContext(decodeDispatcher) {
+            try {
+                Result.success(decode(answer))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
 
     // Client-originated changes for mutations the server doesn't echo back as an
     // event (e.g. mark played/unplayed only writes the playlog server-side). Merged
