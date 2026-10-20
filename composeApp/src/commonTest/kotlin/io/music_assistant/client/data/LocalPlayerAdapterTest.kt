@@ -113,14 +113,53 @@ class LocalPlayerAdapterTest {
     @Test
     fun theServerConfirmingThePauseReleasesTheHoldAndTheSession() = runBlocking<Unit> {
         val local = playing()
-        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.nextSent()
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.nextSent().command)
+        assertTrue(player.held.value)
 
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
 
         await { player.held.value.takeUnless { it } }
         await { adapter.wantsSession.value.takeUnless { it } }
         assertFalse(adapter.wantsSession.value)
+    }
+
+    @Test
+    fun theServerConfirmingAStarvedPauseReleasesTheHoldButKeepsTheSessionForTheResume() = runBlocking<Unit> {
+        val local = playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        assertEquals(PAUSE, client.nextSent().command)
+
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+
+        await { player.held.value.takeUnless { it } }
+        // The resume after the outage still needs the session.
+        assertTrue(adapter.wantsSession.value)
+
+        // The hold is gone, so the resume is a plain play.
+        linkUp()
+        assertEquals(PLAY, client.nextSent().command)
+    }
+
+    @Test
+    fun aUserPauseAfterAConfirmedStarvedPauseReleasesTheSession() = runBlocking<Unit> {
+        val local = playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        client.nextSent()
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+        await { player.held.value.takeUnless { it } }
+
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.nextSent().command)
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+
+        await { adapter.wantsSession.value.takeUnless { it } }
+        assertFalse(adapter.wantsSession.value)
+        linkUp()
+        delay(SETTLE_MS)
+        assertTrue(client.sent.tryReceive().isFailure)
     }
 
     @Test
@@ -211,14 +250,14 @@ class LocalPlayerAdapterTest {
         playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
         assertTrue(adapter.wantsSession.value)
 
         linkUp()
 
         // Still held (the server has not confirmed the pause): pause first, then play.
-        assertEquals(PAUSE, client.sent.receive().command)
-        assertEquals(PLAY, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
+        assertEquals(PLAY, client.nextSent().command)
         assertFalse(player.held.value)
     }
 
@@ -227,10 +266,10 @@ class LocalPlayerAdapterTest {
         playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        client.nextSent()
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
         linkUp()
         delay(SETTLE_MS)
 
@@ -243,7 +282,7 @@ class LocalPlayerAdapterTest {
         playing()
         linkUp()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
         delay(SETTLE_MS)
 
         assertTrue(client.sent.tryReceive().isFailure)
@@ -251,8 +290,8 @@ class LocalPlayerAdapterTest {
         linkDown()
         delay(SETTLE_MS) // a StateFlow conflates: let the adapter see the outage
         linkUp()
-        assertEquals(PAUSE, client.sent.receive().command)
-        assertEquals(PLAY, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
+        assertEquals(PLAY, client.nextSent().command)
     }
 
     @Test
@@ -260,7 +299,7 @@ class LocalPlayerAdapterTest {
         playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        client.nextSent()
 
         player.emit(PlayerEvent.PlaybackStopped(StopCause.FocusLost))
         delay(SETTLE_MS)
