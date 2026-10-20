@@ -74,7 +74,7 @@ class LocalPlayerAdapterTest {
         playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
 
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         await { player.held.value.takeIf { it } }
         assertFalse(adapter.localPlayerData.value?.player?.isPlaying == true)
         assertTrue(adapter.wantsSession.value)
@@ -149,11 +149,11 @@ class LocalPlayerAdapterTest {
     fun aStreamStartedWhileHeldIsAnsweredWithAnotherPause() = runBlocking<Unit> {
         val local = playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        receiveCommand()
 
         player.emit(PlayerEvent.StreamStartedWhileHeld(local.id))
 
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         assertTrue(player.held.value)
     }
 
@@ -169,7 +169,7 @@ class LocalPlayerAdapterTest {
         assertTrue(adapter.wantsSession.value)
 
         client.isReadyForCommands.value = true
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
         await { adapter.wantsSession.value.takeUnless { it } }
         assertFalse(adapter.wantsSession.value)
@@ -179,7 +179,7 @@ class LocalPlayerAdapterTest {
     fun clearingTheStateDropsTheSessionWantButKeepsTheHold() = runBlocking<Unit> {
         playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        receiveCommand()
 
         adapter.clearState()
 
@@ -192,14 +192,14 @@ class LocalPlayerAdapterTest {
         playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         assertTrue(adapter.wantsSession.value)
 
         linkUp()
 
         // Still held (the server has not confirmed the pause): pause first, then play.
-        assertEquals(PAUSE, client.sent.receive().command)
-        assertEquals(PLAY, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
+        assertEquals(PLAY, receiveCommand().command)
         assertFalse(player.held.value)
     }
 
@@ -208,10 +208,10 @@ class LocalPlayerAdapterTest {
         playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        receiveCommand()
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         linkUp()
         delay(SETTLE_MS)
 
@@ -224,7 +224,7 @@ class LocalPlayerAdapterTest {
         playing()
         linkUp()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         delay(SETTLE_MS)
 
         assertTrue(client.sent.tryReceive().isFailure)
@@ -232,8 +232,8 @@ class LocalPlayerAdapterTest {
         linkDown()
         delay(SETTLE_MS) // a StateFlow conflates: let the adapter see the outage
         linkUp()
-        assertEquals(PAUSE, client.sent.receive().command)
-        assertEquals(PLAY, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
+        assertEquals(PLAY, receiveCommand().command)
     }
 
     @Test
@@ -241,7 +241,7 @@ class LocalPlayerAdapterTest {
         playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        receiveCommand()
 
         player.emit(PlayerEvent.PlaybackStopped(StopCause.FocusLost))
         delay(SETTLE_MS)
@@ -257,7 +257,7 @@ class LocalPlayerAdapterTest {
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Next)
 
-        assertEquals(NEXT, client.sent.receive().command)
+        assertEquals(NEXT, receiveCommand().command)
         assertFalse(tracker.isFrozenUntilConfirmed(QUEUE_ID))
         assertEquals(EPISODE_POSITION_SEC, tracker.effectiveSec(QUEUE_ID))
     }
@@ -268,7 +268,7 @@ class LocalPlayerAdapterTest {
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Next)
 
-        assertEquals(NEXT, client.sent.receive().command)
+        assertEquals(NEXT, receiveCommand().command)
         assertTrue(tracker.isFrozenUntilConfirmed(QUEUE_ID))
         assertEquals(0.0, tracker.effectiveSec(QUEUE_ID))
     }
