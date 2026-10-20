@@ -30,6 +30,7 @@ import io.music_assistant.sendspin.api.PlayerEvent
 import io.music_assistant.sendspin.api.PlayerState
 import io.music_assistant.sendspin.api.StopCause
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
@@ -352,7 +353,9 @@ class LocalPlayerAdapter(
     private fun armStarvedResume() {
         starvedResumeJob?.cancel()
         starvedResumePending.value = true
-        starvedResumeJob = launch {
+        // Undispatched, so the wait reads the link state now: a link that comes back before a
+        // dispatched start would read as the stale Connected from before the outage.
+        starvedResumeJob = launch(start = CoroutineStart.UNDISPATCHED) {
             val linkBack = withTimeoutOrNull(STARVED_RESUME_WINDOW_MS) {
                 // The published state may still read Connected from before the outage.
                 player.state.dropWhile { it is PlayerState.Connected }.first { it is PlayerState.Connected }
