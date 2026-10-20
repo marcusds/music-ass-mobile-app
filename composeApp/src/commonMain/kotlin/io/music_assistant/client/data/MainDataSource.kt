@@ -83,6 +83,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
@@ -171,6 +172,9 @@ class MainDataSource(
      * events could end in the wrong order and show the older items. The newest refresh wins.
      */
     private val queueItemRefreshes = LatestJobs<String>(this)
+
+    /** When the last queue-items event arrived for each player. */
+    private val lastQueueItemsEventAt = MutableStateFlow<Map<String, Long>>(emptyMap())
 
     private val _serverPlayers = MutableStateFlow<DataState<List<Player>>>(DataState.Loading())
     private val _queueInfos = MutableStateFlow<List<QueueInfo>>(emptyList())
@@ -1713,16 +1717,23 @@ class MainDataSource(
      *
      * @param fullData the player whose queue items to load.
      * @param forcedQueueData the queue to load instead of the queue on [fullData].
-     * @param coalesce wait [QUEUE_EVENT_COALESCE_MS] first, so a burst of queue events (shuffle,
-     *   then reorder, or a radio queue that appends) costs one paged load.
+     * @param coalesce the refresh answers a queue event. The first event loads at once. An event
+     *   within [QUEUE_EVENT_COALESCE_MS] of the previous one waits that long first, so a burst of
+     *   queue events (shuffle, then reorder, or a radio queue that appends) costs one more paged
+     *   load.
      */
     private fun refreshPlayerQueueItems(
         fullData: PlayerData,
         forcedQueueData: QueueInfo? = null,
         coalesce: Boolean = false,
     ) {
-        queueItemRefreshes.launch(fullData.player.id) {
-            if (coalesce) delay(QUEUE_EVENT_COALESCE_MS)
+        val playerId = fullData.player.id
+        val inBurst = coalesce && currentTimeMillis().let { now ->
+            lastQueueItemsEventAt.getAndUpdate { it + (playerId to now) }[playerId]
+                ?.let { now - it < QUEUE_EVENT_COALESCE_MS } == true
+        }
+        queueItemRefreshes.launch(playerId) {
+            if (inBurst) delay(QUEUE_EVENT_COALESCE_MS)
             (forcedQueueData ?: fullData.queueInfo)?.let { queueInfo ->
                 // Paged so a huge queue never exceeds the server's per-message cap. A queue edited
                 // between two pages can duplicate or skip an item until the next queue event.
