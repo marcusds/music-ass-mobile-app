@@ -84,7 +84,7 @@ class LocalPlayerAdapterTest {
     fun theServerConfirmingThePauseReleasesTheHoldAndTheSession() = runBlocking<Unit> {
         val local = playing()
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         assertTrue(player.held.value)
 
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
@@ -99,7 +99,7 @@ class LocalPlayerAdapterTest {
         val local = playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
 
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
 
@@ -109,7 +109,7 @@ class LocalPlayerAdapterTest {
 
         // The hold is gone, so the resume is a plain play.
         linkUp()
-        assertEquals(PLAY, client.sent.receive().command)
+        assertEquals(PLAY, receiveCommand().command)
     }
 
     @Test
@@ -117,12 +117,12 @@ class LocalPlayerAdapterTest {
         val local = playing()
         linkDown()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        receiveCommand()
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
         await { player.held.value.takeUnless { it } }
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, receiveCommand().command)
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
 
         await { adapter.wantsSession.value.takeUnless { it } }
@@ -306,6 +306,9 @@ class LocalPlayerAdapterTest {
             audio = AudioStatus(AudioPhase.Idle, bufferedMs = 0, starved = false),
         )
     }
+
+    /** The next command sent to the server; fails instead of hanging when none comes. */
+    private suspend fun receiveCommand() = withTimeout(TIMEOUT_MS) { client.sent.receive() }
 
     /** Injects the synthetic local player and lets the server report it as playing. */
     private suspend fun playing(): Player {
