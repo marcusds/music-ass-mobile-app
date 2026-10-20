@@ -9,11 +9,13 @@ import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Audiobook
 import io.music_assistant.client.data.model.client.items.canBeFavorited
 import io.music_assistant.client.data.model.client.items.isLongFormSpokenContent
+import kotlin.math.abs
 
-// Elapsed time can drift up to 1s before we treat it as a real position change.
-// Lower tolerance keeps OEM surfaces that don't extrapolate (OneUI/MIUI/etc.)
-// in lockstep with the in-app slider; debounce(200ms) bounds write churn.
-private const val ELAPSED_TIME_DRIFT_TOLERANCE_MS = 1_000
+// How far the position may drift from the host's extrapolation before we treat it as a
+// real position change (a seek, a stall, a server correction). Positions are truncated to
+// whole seconds, so a steady tick already shows up to 1s of drift; the extra 500ms absorbs
+// jitter in the position anchor. debounce(200ms) bounds write churn.
+private const val ELAPSED_TIME_DRIFT_TOLERANCE_MS = 1_500
 
 data class MediaNotificationData(
     val multiplePlayers: Boolean,
@@ -110,25 +112,24 @@ data class MediaNotificationData(
             )
         }
 
+        /**
+         * True when [new] would publish the same session state as [old]. The position counts as
+         * unchanged while it stays on the line that a host extrapolates from [old]: a playing
+         * item advances with the wall clock, a paused one stands still. Comparing raw positions
+         * would let every re-emission of a playing item through once a second has passed.
+         */
         fun areTooSimilarToUpdate(old: MediaNotificationData, new: MediaNotificationData): Boolean {
             if (old.copy(elapsedTime = null, elapsedUpdateTimeMs = null) !=
                 new.copy(elapsedTime = null, elapsedUpdateTimeMs = null)
             ) {
                 return false
             }
-            if (old.elapsedTime == null) {
-                return new.elapsedTime == null
-            }
-            if (new.elapsedTime == null) {
-                return false
-            }
-            if (old.elapsedTime > new.elapsedTime) {
-                return false
-            }
-            if (new.elapsedTime - old.elapsedTime > ELAPSED_TIME_DRIFT_TOLERANCE_MS) {
-                return false
-            }
-            return true
+            val oldElapsed = old.elapsedTime ?: return new.elapsedTime == null
+            val newElapsed = new.elapsedTime ?: return false
+            val wallClockAdvance = (new.elapsedUpdateTimeMs ?: 0L) - (old.elapsedUpdateTimeMs ?: 0L)
+            val expectedAdvance = wallClockAdvance.takeIf { old.isPlaying } ?: 0L
+            val drift = (newElapsed - oldElapsed) - expectedAdvance
+            return abs(drift) <= ELAPSED_TIME_DRIFT_TOLERANCE_MS
         }
     }
 }
