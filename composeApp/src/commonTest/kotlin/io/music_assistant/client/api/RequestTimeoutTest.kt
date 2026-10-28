@@ -86,7 +86,10 @@ class RequestTimeoutTest {
     @Test
     fun ordinaryCommandsUseTheDefaultTimeout() {
         assertEquals(DEFAULT_REQUEST_TIMEOUT, Request.Player.all().answerTimeout())
-        assertEquals(DEFAULT_REQUEST_TIMEOUT, Request(command = APICommands.MUSIC_ARTISTS_LIBRARY_ITEMS).answerTimeout())
+        assertEquals(
+            DEFAULT_REQUEST_TIMEOUT,
+            Request(command = APICommands.MUSIC_ARTISTS_LIBRARY_ITEMS).answerTimeout(),
+        )
     }
 
     @Test
