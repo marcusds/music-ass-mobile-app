@@ -149,18 +149,27 @@ class ExpandedPlayerPage(
         return this
     }
 
+    /**
+     * waitUntil: a queue event that follows another one within the coalescing window reloads
+     * the queue items after a short wait, so the rows can change after the UI is idle.
+     */
     fun assertNotInQueue(title: String): ExpandedPlayerPage {
-        composeTestRule
-            .onNode(withinTag(CollapsibleQueueSemantics.QUEUE_TAG).and(hasText(title)))
-            .assertDoesNotExist()
+        composeTestRule.waitUntil("queue row '$title' is gone") {
+            composeTestRule
+                .onAllNodes(withinTag(CollapsibleQueueSemantics.QUEUE_TAG).and(hasText(title)))
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
         return this
     }
 
     fun assertQueue(vararg titles: String): ExpandedPlayerPage {
         titles.forEach {
-            composeTestRule
-                .onNode(withinTag(CollapsibleQueueSemantics.QUEUE_TAG).and(hasText(it)))
-                .assertIsDisplayed()
+            composeTestRule.waitUntil("queue row '$it' is displayed") {
+                composeTestRule
+                    .onNode(withinTag(CollapsibleQueueSemantics.QUEUE_TAG).and(hasText(it)))
+                    .isDisplayed()
+            }
         }
 
         return this
