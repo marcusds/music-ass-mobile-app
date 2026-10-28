@@ -46,6 +46,10 @@ internal const val LABEL_ROUTED_CHANNELS_SCHEMA = 49
 internal const val MAX_PENDING_CHUNK_GROUPS = 16
 private const val MAX_REASSEMBLED_BYTES = 16 * 1024 * 1024
 
+// A handoff can report the loss of the old network a moment before the new one arrives.
+// A longer outage still ends the connection before the ICE check would (detection + 4 s grace).
+private const val NETWORK_LOSS_GRACE_MS = 6_000L
+
 /** Reassembles server-side `__chunk__` envelopes while passing legacy whole messages through. */
 internal class WebRTCChunkReassembler {
     private class PendingGroup(
@@ -194,9 +198,10 @@ class WebRTCTransport(
     }
 
     /**
-     * Observes the OS-level default network. When it transitions from available → lost
-     * while we have a live connection, proactively tear down and kick reconnection
-     * instead of waiting for libwebrtc's ICE keepalive to notice (~6s on Android).
+     * Observes the OS-level default network. When it stays lost for [NETWORK_LOSS_GRACE_MS]
+     * under a live connection, tear down and kick reconnection instead of waiting for the
+     * ICE liveness check. A shorter loss is a handoff (Wi-Fi to cellular, a VPN reconnect):
+     * the connection is kept, and the manager's ICE monitor fails it if the path died.
      *
      * Does NOT catch mid-call link-quality degradation (weak signal, packet loss) — the
      * OS still considers the interface up in that case; only ICE/keepalive timeouts fire.
@@ -204,16 +209,19 @@ class WebRTCTransport(
     private fun startNetworkWatchIfNeeded() {
         val net = networkAvailable ?: return
         if (networkWatchJob?.isActive == true) return
-        networkWatchJob = scope.launch {
-            var wasAvailable = net.value
-            net.collect { available ->
-                if (wasAvailable && !available && _state.value is TransportState.Connected) {
-                    logger.w { "Default network lost — proactively aborting connection (skipping libwebrtc ICE timeout)" }
-                    onNetworkLost()
-                }
-                wasAvailable = available
-            }
-        }
+        networkWatchJob = scope.watchNetworkLoss(
+            networkAvailable = net,
+            graceMs = NETWORK_LOSS_GRACE_MS,
+            liveConnection = { manager?.takeIf { _state.value is TransportState.Connected } },
+            onLossSeen = {
+                logger.w { "Default network lost — waiting ${NETWORK_LOSS_GRACE_MS}ms for a replacement" }
+                manager?.diagnostics?.event("network lost; grace ${NETWORK_LOSS_GRACE_MS}ms started")
+            },
+            onLossConfirmed = {
+                logger.w { "Default network still lost — aborting connection (skipping libwebrtc ICE timeout)" }
+                onNetworkLost()
+            },
+        )
     }
 
     private fun onNetworkLost() {
