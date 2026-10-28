@@ -88,9 +88,6 @@ class KtorServiceClient(
     // Declared before currentClient, whose initializer reads it.
     private val httpClientFactory: HttpClientFactory by inject()
 
-    // The ping interval applies on iOS (Darwin): Ktor pings and closes the socket when a
-    // pong does not come back within two intervals. The OkHttp engine ignores it, so
-    // Android sets its ping in AndroidHttpClientFactory.
     @kotlin.concurrent.Volatile
     private var currentClient: HttpClient = httpClientFactory.create {
         install(WebSockets) {
