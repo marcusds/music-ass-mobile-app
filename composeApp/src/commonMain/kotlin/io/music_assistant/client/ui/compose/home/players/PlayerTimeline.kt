@@ -46,16 +46,6 @@ private const val SEEK_STICK_EPSILON_SECONDS = 0.5f
 // buffered" without introducing a second color.
 private const val BUFFER_TRACK_ALPHA = 0.45f
 
-/**
- * The seek slider of the full player, with the elapsed and total time labels. Only this
- * composable reads the live position and the buffer level, so their ticks recompose the
- * timeline and not the whole player.
- *
- * @param positionState the live position in seconds; null falls back to the queue's elapsed time.
- * @param currentChapter the chapter that the timeline shows, or null for the full item.
- * @param duration the full item duration in seconds; null disables the slider.
- * @param center the content between the time labels.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerTimeline(
@@ -72,8 +62,6 @@ fun PlayerTimeline(
     val currentMedia = item.player.currentMedia
     val poweredOff = item.player.isPoweredOff
 
-    // Live position from PlayerPositionTracker — single source of truth shared
-    // with notification + Android Auto.
     val displayPosition = positionState?.value?.toFloat()
         ?: item.queueInfo?.elapsedTime?.toFloat()
         ?: 0f

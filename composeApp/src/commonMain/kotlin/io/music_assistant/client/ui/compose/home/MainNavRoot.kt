@@ -162,8 +162,7 @@ fun MainNavigationRoot(
         }
     }
 
-    // The players state changes with every player update. Read it only in lambdas, effects,
-    // derived states and child composables: a read in this scope would recompose the whole app UI.
+    // Changes with every player update: a read in this scope would recompose the whole app UI.
     val playersState = homeScreenViewModel.playersState.collectAsStateWithLifecycle()
     val currentPlayersData = { playersState.value as? HomeScreenViewModel.PlayersState.Data }
     // Single pager state used across all views
@@ -172,8 +171,7 @@ fun MainNavigationRoot(
         pageCount = { currentPlayersData()?.playerData?.size ?: 0 },
     )
 
-    // Only a new selection or a new page list moves the pager. A restart on every player update
-    // would scroll the pager back to the selection while a swipe settles.
+    // A restart on every player update would scroll the pager back while a swipe settles.
     val pagerSync by remember {
         derivedStateOf {
             currentPlayersData()?.let { data ->
@@ -294,7 +292,6 @@ fun MainNavigationRoot(
         )
     }
 
-    // Only what the nav item shows, so a player update that keeps it does not recompose this scope.
     val selectedPlayerLabel by remember {
         derivedStateOf {
             currentPlayersData()?.selectedPlayer?.let {
@@ -436,7 +433,6 @@ fun MainNavigationRoot(
 
 private data class SelectedPlayerLabel(val name: String, val label: String, val icon: DrawableResource)
 
-/** The player picker. It reads [playersState] in its own scope, so a player update recomposes the sheet only. */
 @Composable
 private fun PlayerSelectionSheet(
     playersState: State<HomeScreenViewModel.PlayersState>,

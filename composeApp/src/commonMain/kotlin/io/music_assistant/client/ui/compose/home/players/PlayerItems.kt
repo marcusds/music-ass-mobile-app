@@ -351,8 +351,7 @@ fun FullPlayerItem(
         val duration = if (poweredOff) null else currentMedia?.duration?.takeIf { it > 0 }?.toFloat()
 
         // Live position from PlayerPositionTracker — single source of truth shared with
-        // notification + Android Auto. Only PlayerTimeline and the derived chapter below read
-        // it, so the position tick does not recompose the art, title and controls.
+        // notification + Android Auto.
         val positionState = livePositionFlow
             ?.collectAsStateWithLifecycle(initialValue = item.queueInfo?.elapsedTime ?: 0.0)
 

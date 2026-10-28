@@ -234,8 +234,7 @@ fun PlayersPager(
             onDismiss = { dialogRequest = null },
         )
 
-        // Keyed by player id: PlayerData holds the whole queue, so hashing it is costly, and the
-        // key keeps each player's remembered colors when the list order changes.
+        // Keyed by player id: hashing PlayerData walks the whole queue.
         val playerColors = playerDataList.associate { playerData ->
             key(playerData.playerId) {
                 playerData.playerId to rememberAnimatedPlayerColors(
