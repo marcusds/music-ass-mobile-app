@@ -751,7 +751,6 @@ class SharedMediaSessionManager(
             .build()
     }
 
-
     private fun titleMetadata(data: MediaNotificationData): String =
         data.name ?: strings?.unknownTrack ?: ""
 
