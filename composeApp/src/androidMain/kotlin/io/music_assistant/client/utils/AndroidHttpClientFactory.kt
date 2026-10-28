@@ -51,9 +51,8 @@ class AndroidHttpClientFactory(
             config {
                 sslSocketFactory(socketFactory, trustManager)
                 connectionPool(connectionPool)
-                // The OkHttp engine ignores the `pingInterval` of the Ktor WebSockets plugin,
-                // so without this a WebSocket never pings and a dead link is found only by TCP.
-                // OkHttp fails the socket when a pong is not back before the next ping.
+                // The OkHttp engine ignores the WebSockets plugin's pingInterval, so without
+                // this a WebSocket never pings and only TCP notices a dead link.
                 pingInterval(WEBSOCKET_PING_INTERVAL)
             }
         }
