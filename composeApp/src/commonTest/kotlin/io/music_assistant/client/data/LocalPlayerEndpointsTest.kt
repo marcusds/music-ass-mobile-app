@@ -32,6 +32,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotSame
 import kotlin.test.assertNull
@@ -214,6 +215,34 @@ class LocalPlayerEndpointsTest {
     }
 
     @Test
+    fun reopenedChannelsThatTheServerNeverAnsweredFallBackToRenegotiation() = runTest {
+        val endpoints = LocalPlayerEndpoints(client, settings, backgroundScope)
+        client.sessionState.value = webRtcAt(SERVER_2_11_SCHEMA)
+        runCurrent()
+        val endpoint = spendNegotiatedChannel(endpoints)
+        repeat(SendspinChannelPlan.MAX_SILENT_IN_BAND) {
+            client.reopened = openChannel()
+            endpoint.openChannel().close()
+        }
+
+        endpoint.openChannel()
+        assertEquals(SendspinChannelPlan.MAX_SILENT_IN_BAND, client.openedLabels.size)
+        assertEquals(1, client.renegotiations)
+    }
+
+    @Test
+    fun aReopenedChannelThatClosesBeforeItOpensFailsTheAttemptAtOnce() = runTest {
+        val endpoints = LocalPlayerEndpoints(client, settings, backgroundScope)
+        client.sessionState.value = webRtcAt(SERVER_2_11_SCHEMA)
+        runCurrent()
+        val endpoint = spendNegotiatedChannel(endpoints)
+        client.reopened = closedChannel()
+
+        assertFailsWith<IllegalStateException> { endpoint.openChannel() }
+        assertEquals(0, client.renegotiations)
+    }
+
+    @Test
     fun aProvenSessionYieldsTheProxiedWebSocketEndpoint() = runTest {
         val endpoints = LocalPlayerEndpoints(client, settings, backgroundScope)
         client.sessionState.value = authenticated
@@ -271,13 +300,18 @@ class LocalPlayerEndpointsTest {
 }
 
 /** An open channel with nothing to deliver. */
-private fun openChannel() = DataChannelWrapper(
+private fun openChannel() = channel(DataChannelState.Open)
+
+/** A channel that the server closed before it opened. */
+private fun closedChannel() = channel(DataChannelState.Closed)
+
+private fun channel(state: DataChannelState) = DataChannelWrapper(
     dataChannel = null,
     connectionEvents = null,
     receiveSource = object : DataChannelReceiveSource {
         override suspend fun receive(): DataChannelInbound = awaitCancellation()
     },
-    initialState = DataChannelState.Open,
+    initialState = state,
     label = "sendspin",
     diagnostics = WebRTCDiagnostics(),
 )
