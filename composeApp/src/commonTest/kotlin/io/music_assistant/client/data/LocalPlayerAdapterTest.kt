@@ -13,6 +13,9 @@ import io.music_assistant.client.settings.SettingsRepository
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.utils.SessionState
 import io.music_assistant.sendspin.api.AudioCodec
+import io.music_assistant.sendspin.api.AudioPhase
+import io.music_assistant.sendspin.api.AudioStatus
+import io.music_assistant.sendspin.api.ClockQuality
 import io.music_assistant.sendspin.api.PlayerEvent
 import io.music_assistant.sendspin.api.PlayerState
 import io.music_assistant.sendspin.api.SendspinPlayer
@@ -110,14 +113,53 @@ class LocalPlayerAdapterTest {
     @Test
     fun theServerConfirmingThePauseReleasesTheHoldAndTheSession() = runBlocking<Unit> {
         val local = playing()
-        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.nextSent()
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.nextSent().command)
+        assertTrue(player.held.value)
 
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
 
         await { player.held.value.takeUnless { it } }
         await { adapter.wantsSession.value.takeUnless { it } }
         assertFalse(adapter.wantsSession.value)
+    }
+
+    @Test
+    fun theServerConfirmingAStarvedPauseReleasesTheHoldButKeepsTheSessionForTheResume() = runBlocking<Unit> {
+        val local = playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        assertEquals(PAUSE, client.nextSent().command)
+
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+
+        await { player.held.value.takeUnless { it } }
+        // The resume after the outage still needs the session.
+        assertTrue(adapter.wantsSession.value)
+
+        // The hold is gone, so the resume is a plain play.
+        linkUp()
+        assertEquals(PLAY, client.nextSent().command)
+    }
+
+    @Test
+    fun aUserPauseAfterAConfirmedStarvedPauseReleasesTheSession() = runBlocking<Unit> {
+        val local = playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        client.nextSent()
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+        await { player.held.value.takeUnless { it } }
+
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.nextSent().command)
+        adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
+
+        await { adapter.wantsSession.value.takeUnless { it } }
+        assertFalse(adapter.wantsSession.value)
+        linkUp()
+        delay(SETTLE_MS)
+        assertTrue(client.sent.tryReceive().isFailure)
     }
 
     @Test
@@ -204,6 +246,70 @@ class LocalPlayerAdapterTest {
     }
 
     @Test
+    fun theAudioLinkComingBackAfterAStarvedStopResumesPlayback() = runBlocking<Unit> {
+        playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        assertEquals(PAUSE, client.nextSent().command)
+        assertTrue(adapter.wantsSession.value)
+
+        linkUp()
+
+        // Still held (the server has not confirmed the pause): pause first, then play.
+        assertEquals(PAUSE, client.nextSent().command)
+        assertEquals(PLAY, client.nextSent().command)
+        assertFalse(player.held.value)
+    }
+
+    @Test
+    fun aUserPauseDuringTheOutageCancelsTheResume() = runBlocking<Unit> {
+        playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        client.nextSent()
+
+        adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Pause)
+        assertEquals(PAUSE, client.nextSent().command)
+        linkUp()
+        delay(SETTLE_MS)
+
+        assertTrue(client.sent.tryReceive().isFailure)
+        assertTrue(player.held.value)
+    }
+
+    @Test
+    fun aStaleConnectedStateDoesNotResumeAtOnce() = runBlocking<Unit> {
+        playing()
+        linkUp()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        assertEquals(PAUSE, client.nextSent().command)
+        delay(SETTLE_MS)
+
+        assertTrue(client.sent.tryReceive().isFailure)
+
+        linkDown()
+        delay(SETTLE_MS) // a StateFlow conflates: let the adapter see the outage
+        linkUp()
+        assertEquals(PAUSE, client.nextSent().command)
+        assertEquals(PLAY, client.nextSent().command)
+    }
+
+    @Test
+    fun aFocusLossDuringTheOutageCancelsTheResume() = runBlocking<Unit> {
+        playing()
+        linkDown()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
+        client.nextSent()
+
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.FocusLost))
+        delay(SETTLE_MS)
+        linkUp()
+        delay(SETTLE_MS)
+
+        assertTrue(client.sent.tryReceive().isFailure)
+    }
+
+    @Test
     fun aNextOnTheLastItemKeepsThePosition() = runBlocking<Unit> {
         playingAt(currentIndex = 0, itemCount = 1)
 
@@ -244,6 +350,19 @@ class LocalPlayerAdapterTest {
             ),
         )
         tracker.setAnchor(QUEUE_ID, elapsedSec = EPISODE_POSITION_SEC, isPlaying = false)
+    }
+
+    private fun linkDown() {
+        player.state.value = PlayerState.Reconnecting(attempt = 1, nextRetryAtMs = null, audio = AudioStatus.IDLE)
+    }
+
+    private fun linkUp() {
+        player.state.value = PlayerState.Connected(
+            playerId = "local",
+            serverName = "server",
+            clock = ClockQuality.Good,
+            audio = AudioStatus(AudioPhase.Idle, bufferedMs = 0, starved = false),
+        )
     }
 
     /** Injects the synthetic local player and lets the server report it as playing. */

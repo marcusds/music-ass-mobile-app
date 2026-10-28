@@ -31,12 +31,14 @@ import io.music_assistant.sendspin.api.PlayerEvent
 import io.music_assistant.sendspin.api.PlayerState
 import io.music_assistant.sendspin.api.StopCause
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -102,7 +104,11 @@ class LocalPlayerAdapter(
      * old state of the other. [held] mirrors the hold this adapter set on [player]; it masks the
      * server's stale "playing", and it outlives the data ([clearState] keeps it).
      */
-    private data class LocalState(val data: PlayerData? = null, val held: Boolean = false)
+    private data class LocalState(
+        val data: PlayerData? = null,
+        val held: Boolean = false,
+        val starvedResumePending: Boolean = false,
+    )
 
     private val localState = MutableStateFlow(LocalState())
 
@@ -113,10 +119,12 @@ class LocalPlayerAdapter(
      * True while the local player plays, or while a local pause is not yet confirmed by the
      * server. The hold is that pause: the server still streams until the queued pause lands,
      * so the MA session must keep reconnecting instead of being torn down in the background.
-     * A stop forced by an empty buffer during an outage is such a pause, like a user's.
+     * A stop forced by an empty buffer during an outage is such a pause, like a user's, and
+     * the session stays wanted while that stop may still resume on its own.
      */
-    val wantsSession: StateFlow<Boolean> =
-        localState.mapState { state -> state.data?.let { it.player.isPlaying || state.held } == true }
+    val wantsSession: StateFlow<Boolean> = localState.mapState { state ->
+        state.data?.let { it.player.isPlaying || state.held || state.starvedResumePending } == true
+    }
 
     private inline fun updateData(transform: (PlayerData?) -> PlayerData?) {
         localState.update { it.copy(data = transform(it.data)) }
@@ -172,6 +180,9 @@ class LocalPlayerAdapter(
     )
     private var pendingPlayTimeoutJob: Job? = null
     private var pausedByInterruption = false
+
+    /** Waits, after a [StopCause.Starved] stop, for the audio link to come back; see [armStarvedResume]. */
+    private var starvedResumeJob: Job? = null
 
     private val outputHeld: Boolean get() = localState.value.held
 
@@ -265,19 +276,27 @@ class LocalPlayerAdapter(
 
             is PlayerEvent.PlaybackStopped -> when (event.cause) {
                 // A local pause like a user's: held, queued, and answered with a pause if the
-                // server starts a stream first. The player never resumes on its own.
+                // server starts a stream first. It resumes on its own only when the audio link
+                // comes back within the grace window (see [armStarvedResume]).
                 StopCause.Starved -> {
                     log.w { "Playback stopped: buffer ran dry while disconnected" }
-                    pauseLocalIfPlaying()
+                    // Arm before the pause leaves: a user pause that follows it must find the
+                    // resume to cancel, and the wait must start before the audio link returns.
+                    localPlayerData.value?.takeIf { it.player.isPlaying }?.let {
+                        armStarvedResume()
+                        dispatchLocalCommand(it, PlayerAction.Pause)
+                    }
                 }
 
                 StopCause.FocusLost -> {
+                    cancelStarvedResume()
                     pausedByInterruption = localPlayerData.value?.player?.isPlaying == true
                     log.i { "Playback stopped: audio focus lost, resume=$pausedByInterruption" }
                     pauseLocalIfPlaying()
                 }
 
                 StopCause.SinkFailed -> {
+                    cancelStarvedResume()
                     log.w { "Playback stopped: audio output failed" }
                     pauseLocalIfPlaying()
                 }
@@ -297,16 +316,21 @@ class LocalPlayerAdapter(
 
             // The local pause never reached the server (lost, or the session was reset):
             // send it again. Built from the event's id, because the player data may be gone.
-            is PlayerEvent.StreamStartedWhileHeld -> {
-                log.i { "Server started a stream while held: pausing ${event.playerId}" }
-                optimisticPause()
-                launch {
-                    // Not a user pause: a Play that waits for this reconnect still wins.
-                    commands.sendOrQueue(
-                        PlayerAction.Pause,
-                        Request.Player.simpleCommand(playerId = event.playerId, command = "pause"),
-                        userIntent = false,
-                    )
+            is PlayerEvent.StreamStartedWhileHeld -> when {
+                // A play intent (a user's Play, or the resume after a starved stop) lifted the
+                // hold after the event left the player: that play wins, so do not pause again.
+                !outputHeld -> log.i { "Stream started while held, but the hold is gone: playing" }
+                else -> {
+                    log.i { "Server started a stream while held: pausing ${event.playerId}" }
+                    optimisticPause()
+                    launch {
+                        // Not a user pause: a Play that waits for this reconnect still wins.
+                        commands.sendOrQueue(
+                            PlayerAction.Pause,
+                            Request.Player.simpleCommand(playerId = event.playerId, command = "pause"),
+                            userIntent = false,
+                        )
+                    }
                 }
             }
 
@@ -323,6 +347,12 @@ class LocalPlayerAdapter(
      */
     fun handleLocalCommand(data: PlayerData, action: PlayerAction) {
         val resolved = playerRequestFactory.resolve(data, resolveLocalToggle(data, action))
+        // A transport command from the user replaces a pending resume after a starved stop.
+        if (resolved.isTransport) cancelStarvedResume()
+        dispatchLocalCommand(data, resolved)
+    }
+
+    private fun dispatchLocalCommand(data: PlayerData, resolved: PlayerAction) {
         if (resolved.movesPlayback) {
             sendOrDrop(data, resolved)
             return
@@ -358,7 +388,50 @@ class LocalPlayerAdapter(
      * A play request from another surface (library, car, Siri, queue item) targets the local
      * player: lift the hold before the server's stream arrives, or it would be paused again.
      */
-    fun onPlaybackRequested() = hold(false)
+    fun onPlaybackRequested() {
+        cancelStarvedResume()
+        hold(false)
+    }
+
+    private fun setStarvedResumePending(pending: Boolean) {
+        localState.update { it.copy(starvedResumePending = pending) }
+    }
+
+    /**
+     * A starved stop is an outage, not a choice: in a car every cell handoff longer than the
+     * buffer would end playback for good. If the audio link drops and comes back (and the MA
+     * session is ready) within [STARVED_RESUME_WINDOW_MS], play again the way a local Play does:
+     * the queued pause lands first, then the pause and play give a fresh stream. A transport
+     * command, another surface's play request, a focus loss or a sink failure cancels it.
+     */
+    private fun armStarvedResume() {
+        starvedResumeJob?.cancel()
+        setStarvedResumePending(true)
+        // Undispatched, so the wait reads the link state now: a link that comes back before a
+        // dispatched start would read as the stale Connected from before the outage.
+        starvedResumeJob = launch(start = CoroutineStart.UNDISPATCHED) {
+            val linkBack = withTimeoutOrNull(STARVED_RESUME_WINDOW_MS) {
+                // The published state may still read Connected from before the outage.
+                player.state.dropWhile { it is PlayerState.Connected }.first { it is PlayerState.Connected }
+                apiClient.isReadyForCommands.first { it }
+            } != null
+            ensureActive() // a pause that cancelled the wait as it ended still wins
+            setStarvedResumePending(false)
+            when {
+                !linkBack -> log.i { "Audio link not back within the grace window: staying paused" }
+                else -> localPlayerData.value?.let {
+                    log.i { "Audio link back after a starved stop: resuming" }
+                    dispatchLocalCommand(it, PlayerAction.Play)
+                }
+            }
+        }
+    }
+
+    private fun cancelStarvedResume() {
+        starvedResumeJob?.cancel()
+        starvedResumeJob = null
+        setStarvedResumePending(false)
+    }
 
     /** Platform remote command (Control Center, lock screen, CarPlay). */
     fun onRemoteCommand(command: String) {
@@ -594,6 +667,7 @@ class LocalPlayerAdapter(
      * The hold stays: a pause lost here is sent again on the next stream/start while held.
      */
     fun clearState() {
+        cancelStarvedResume()
         updateData { null }
         launch { commands.clear() }
     }
@@ -694,8 +768,15 @@ class LocalPlayerAdapter(
 
         /** A format change while offline must not pause and play much later. */
         const val FORMAT_RESTART_WAIT_MS = 30_000L
+
+        /** How long after a starved stop a returning audio link still resumes playback. */
+        const val STARVED_RESUME_WINDOW_MS = 30_000L
     }
 }
+
+/** Play, pause, power and the playback movers: what a user does to stop or start playback. */
+private val PlayerAction.isTransport: Boolean
+    get() = this == PlayerAction.Pause || this is PlayerAction.SetPower || movesPlayback
 
 /**
  * Resolves a local play/pause toggle to the explicit action the user asked for,
