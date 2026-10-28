@@ -79,6 +79,23 @@ class ConnectivityOnlineTest {
     }
 
     @Test
+    fun aLateLossOfTheReplacedNetworkStaysOnline() = runTest {
+        shadow.setActiveNetworkInfo(null)
+        val online = connectivityOnline(context, ownScope())
+        val callback = shadow.networkCallbacks.single()
+        val wifi: Network = ShadowNetwork.newInstance(1)
+        val cellular: Network = ShadowNetwork.newInstance(2)
+        callback.onAvailable(wifi)
+
+        callback.onAvailable(cellular)
+        callback.onLost(wifi)
+        assertTrue(online.value, "after the late loss of the replaced network")
+
+        callback.onLost(cellular)
+        assertFalse(online.value, "after the loss of the current network")
+    }
+
+    @Test
     fun theCallbackIsUnregisteredWhenTheScopeEnds() = runTest {
         val scope = ownScope()
         connectivityOnline(context, scope)
