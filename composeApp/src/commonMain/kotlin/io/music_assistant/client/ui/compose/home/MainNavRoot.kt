@@ -114,8 +114,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
 import musicassistantclient.composeapp.generated.resources.Res
-import musicassistantclient.composeapp.generated.resources.cd_current_player
 import musicassistantclient.composeapp.generated.resources.app_name
+import musicassistantclient.composeapp.generated.resources.cd_current_player
 import musicassistantclient.composeapp.generated.resources.nav_discover
 import musicassistantclient.composeapp.generated.resources.nav_library
 import musicassistantclient.composeapp.generated.resources.nav_menu
