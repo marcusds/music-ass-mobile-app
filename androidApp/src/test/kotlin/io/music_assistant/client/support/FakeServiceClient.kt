@@ -367,7 +367,10 @@ class FakeServiceClient : ServiceClient {
             }
 
             APICommands.PLAYER_QUEUES_PLAY_MEDIA -> {
+                // An endless mix from server 2.10 plays the dynamic playlist of its seed; the fake
+                // plays the seed, as it does for radio_mode.
                 val mediaUri = ((request.args!!["media"] as JsonArray)[0] as JsonPrimitive).content
+                    .removePrefix(ENDLESS_MIX_PLAYLIST_URI_PREFIX)
                 val startItemId = request.getArgOrNull("start_item")
                 val mediaTracks =
                     mediaItemStore.getByUri(mediaUri)?.let { item ->
@@ -973,6 +976,8 @@ class FakeServiceClient : ServiceClient {
 
     enum class LegacyVersion
 }
+
+private const val ENDLESS_MIX_PLAYLIST_URI_PREFIX = "radio_playlist://playlist/"
 
 private fun answer(request: Request, result: JsonElement): Answer {
     return Answer(
