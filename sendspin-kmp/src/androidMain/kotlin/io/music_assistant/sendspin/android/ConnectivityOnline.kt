@@ -13,18 +13,27 @@ import kotlinx.coroutines.flow.stateIn
 
 /**
  * [io.music_assistant.sendspin.api.SendspinDeps.online] from the default network: true
- * while a default network is up. The network callback stays registered until [scope] ends.
+ * while a default network is up. The late loss of a network that the default already replaced
+ * does not count. The network callback stays registered until [scope] ends.
  * Needs the `ACCESS_NETWORK_STATE` permission, which the module manifest declares.
  */
 public fun connectivityOnline(context: Context, scope: CoroutineScope): StateFlow<Boolean> {
     val manager = context.applicationContext.getSystemService(ConnectivityManager::class.java)
     return callbackFlow {
         val callback = object : ConnectivityManager.NetworkCallback() {
+            // A handoff (Wi-Fi to cellular, a VPN reconnect) can report the new default network
+            // before the loss of the old one. Only the loss of the current default network is an
+            // outage. The callbacks run on one thread.
+            private var current: Network? = null
+
             override fun onAvailable(network: Network) {
+                current = network
                 trySend(true)
             }
 
             override fun onLost(network: Network) {
+                if (current?.let { it != network } == true) return
+                current = null
                 trySend(false)
             }
         }
