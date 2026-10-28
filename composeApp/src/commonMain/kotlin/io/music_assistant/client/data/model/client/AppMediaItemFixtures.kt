@@ -47,6 +47,7 @@ object AppMediaItemFixtures {
         name: String = "Album $itemId",
         artist: Artist? = artist(),
         version: String? = null,
+        year: Int? = null,
     ): Album {
         return Album(
             itemId = itemId,
@@ -60,7 +61,7 @@ object AppMediaItemFixtures {
             uri = null,
             images = emptyMap(),
             version = version,
-            year = null,
+            year = year,
             artists = if (artist != null) {
                 listOf(artist)
             } else {

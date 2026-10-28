@@ -101,8 +101,27 @@ class ItemDetailsTest {
             )
         }
 
-        composeTestRule.onAllNodes(hasText(album.name)).onFirst().assertIsDisplayed()
-        composeTestRule.onAllNodes(hasText(album.version!!)).onFirst().assertIsDisplayed()
+        composeTestRule.onAllNodes(hasText("Best Version")).onFirst().assertIsDisplayed()
+    }
+
+    @Test
+    fun `displays album year`() {
+        val artist = AppMediaItemFixtures.artist()
+        val album = AppMediaItemFixtures.album(artist = artist, year = 1992)
+
+        composeTestRule.setInspectableContent {
+            ItemDetails(
+                state = ItemDetailsViewModel.State(
+                    itemState = DataState.Data(album),
+                    albumsState = DataState.NoData(),
+                    playableItemsState = DataState.Data(emptyList()),
+                ),
+                geEditablePlaylists = suspend { emptyList() },
+                fetchColors = NoColors,
+            )
+        }
+
+        composeTestRule.onAllNodes(hasText("1992", substring = true)).onFirst().assertIsDisplayed()
     }
 
     @Test
@@ -324,7 +343,8 @@ class ItemDetailsTest {
         assertEquals(1, refreshes)
 
         refreshing = true
-        composeTestRule.onNodeWithContentDescription(Res.string.cd_refreshing_item.get()).assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription(Res.string.cd_refreshing_item.get())
+            .assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription(Res.string.cd_more.get()).performClick()
         composeTestRule.onNodeWithText(Res.string.action_refresh_item.get()).assertIsNotEnabled()
     }
@@ -342,7 +362,8 @@ class ItemDetailsTest {
         }
 
         composeTestRule.onNodeWithContentDescription(Res.string.cd_more.get()).performClick()
-        composeTestRule.onNodeWithText(Res.string.action_find_on_music_services.get()).assertIsDisplayed()
+        composeTestRule.onNodeWithText(Res.string.action_find_on_music_services.get())
+            .assertIsDisplayed()
         composeTestRule.onNodeWithText(Res.string.action_refresh_item.get()).assertDoesNotExist()
     }
 
@@ -356,7 +377,8 @@ class ItemDetailsTest {
 
         composeTestRule.onNodeWithContentDescription(Res.string.cd_more.get()).performClick()
         composeTestRule.onNodeWithText(Res.string.action_refresh_item.get()).assertDoesNotExist()
-        composeTestRule.onNodeWithText(Res.string.action_find_on_music_services.get()).assertDoesNotExist()
+        composeTestRule.onNodeWithText(Res.string.action_find_on_music_services.get())
+            .assertDoesNotExist()
     }
 
     @Test
@@ -380,7 +402,8 @@ class ItemDetailsTest {
             Res.string.item_duration_minutes.get(7),
         ).joinToString(" · ")
         composeTestRule.onNodeWithText(facts).assertIsDisplayed()
-        composeTestRule.onNodeWithText(Res.string.item_section_review.get()).performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithText(Res.string.item_section_review.get()).performScrollTo()
+            .assertIsDisplayed()
         composeTestRule.onNodeWithText("A short review.").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithText(Res.string.item_description_more.get()).assertDoesNotExist()
     }
@@ -437,12 +460,15 @@ class ItemDetailsTest {
 
     @Test
     fun `audiobook header shows the narrators and the publisher`() {
-        val book = AppMediaItemFixtures.audiobook().copy(narrators = listOf("Ann", "Bob"), publisher = "Pub House")
+        val book = AppMediaItemFixtures.audiobook()
+            .copy(narrators = listOf("Ann", "Bob"), publisher = "Pub House")
 
         composeTestRule.setInspectableContent { ItemHeader(item = book) }
 
-        composeTestRule.onNodeWithText(Res.string.item_narrated_by.get("Ann, Bob")).assertIsDisplayed()
-        composeTestRule.onNodeWithText(Res.string.item_publisher.get("Pub House")).assertIsDisplayed()
+        composeTestRule.onNodeWithText(Res.string.item_narrated_by.get("Ann, Bob"))
+            .assertIsDisplayed()
+        composeTestRule.onNodeWithText(Res.string.item_publisher.get("Pub House"))
+            .assertIsDisplayed()
     }
 
     private fun albumState(

@@ -85,6 +85,7 @@ fun ItemFacts(
 ) {
     val facts = listOfNotNull(
         (item as? Album)?.albumType?.let { stringResource(it.stringResource()) },
+        (item as? Album)?.year?.toString(),
         playableSummary?.let { pluralStringResource(Res.plurals.item_track_count, it.count, it.count) },
         playableSummary?.totalSeconds?.toTotalDuration()?.localized(),
         (item as? Audiobook)?.publisher?.takeIf { it.isNotBlank() }
