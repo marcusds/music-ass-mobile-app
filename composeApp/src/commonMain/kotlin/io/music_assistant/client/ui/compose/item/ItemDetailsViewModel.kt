@@ -42,6 +42,7 @@ import io.music_assistant.client.data.repository.favoriteAfter
 import io.music_assistant.client.settings.SettingsRepository
 import io.music_assistant.client.ui.compose.common.DataState
 import io.music_assistant.client.ui.compose.common.map
+import io.music_assistant.client.utils.mapChangedOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -695,27 +696,25 @@ class ItemDetailsViewModel(
         }
     }
 
+    // A change for an item that is not on screen returns before any list work.
     private fun updateSubItemIfNeeded(changed: AppMediaItem, change: MediaItemChange) {
         when (changed) {
             is Artist -> {
                 val artistsData = (_state.value.artistsState as? DataState.Data)?.data ?: return
-                val updated = artistsData.map {
-                    if (it.itemId == changed.itemId) changed.withFavorite(change.favoriteAfter(it.favorite)) else it
-                }
+                val updated = artistsData.mapChangedOrNull { row ->
+                    patchedRow(row, row, change, { changed.withFavorite(it) }, { row.withFavorite(it) })
+                } ?: return
                 _state.update { it.copy(artistsState = DataState.Data(updated)) }
             }
 
             is Album -> {
                 val albumsData = (_state.value.albumsState as? DataState.Data)?.data ?: return
-                val replace = { album: Album ->
-                    if (album.itemId == changed.itemId) {
-                        changed.withFavorite(change.favoriteAfter(album.favorite))
-                    } else {
-                        album
-                    }
+                val patch = { row: Album ->
+                    patchedRow(row, row, change, { changed.withFavorite(it) }, { row.withFavorite(it) })
                 }
-                rawAlbums = rawAlbums.map(replace)
-                _state.update { it.copy(albumsState = DataState.Data(albumsData.map(replace))) }
+                val updated = albumsData.mapChangedOrNull(patch) ?: return
+                rawAlbums = rawAlbums.mapChangedOrNull(patch) ?: rawAlbums
+                _state.update { it.copy(albumsState = DataState.Data(updated)) }
             }
 
             is PlayableItem -> {
@@ -730,14 +729,17 @@ class ItemDetailsViewModel(
                 // Non-null inputs mean Data or Data pending: the derivation runs off Main, so the
                 // state can still read Loading while the raw list is already set.
                 if (playableInputs.value == null) return
-                if (rawPlayableItems.none { it.itemId == changed.itemId }) return
-                rawPlayableItems = rawPlayableItems.map { existing ->
-                    if (existing.itemId == changed.itemId) {
-                        changed.withFavorite(change.favoriteAfter(existing.favorite))
-                    } else {
-                        existing
-                    }
-                }
+                rawPlayableItems = rawPlayableItems.mapChangedOrNull { row ->
+                    (row as? AppMediaItem)?.let { rowItem ->
+                        patchedRow<PlayableItem>(
+                            row,
+                            rowItem,
+                            change,
+                            { changed.withFavorite(it) },
+                            { row.withFavorite(it) },
+                        )
+                    } ?: row
+                } ?: return
                 publishPlayableItems()
             }
 
@@ -760,6 +762,26 @@ class ItemDetailsViewModel(
                 }
             },
         )
+    }
+
+    /**
+     * The [row] after [change]. A row with the same key becomes the changed item ([replacement]). A
+     * row that only shares a provider mapping keeps its own id, uri and playlist position, and gets
+     * the new favorite state only ([withFavorite]). Any other row comes back unchanged.
+     */
+    private fun <T> patchedRow(
+        row: T,
+        rowItem: AppMediaItem,
+        change: MediaItemChange,
+        replacement: (Boolean?) -> T,
+        withFavorite: (Boolean?) -> T,
+    ): T {
+        val favorite = change.favoriteAfter(rowItem.favorite)
+        return when {
+            rowItem.hasSameKeyAs(change.item) -> replacement(favorite)
+            !rowItem.hasAnyMappingFrom(change.item) || favorite == rowItem.favorite -> row
+            else -> withFavorite(favorite)
+        }
     }
 
     companion object {
