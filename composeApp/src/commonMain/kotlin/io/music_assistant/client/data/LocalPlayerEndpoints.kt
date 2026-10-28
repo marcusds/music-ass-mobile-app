@@ -29,10 +29,12 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.Volatile
 
 /**
  * Derives the Sendspin [Endpoint] from the MA session. The endpoint follows the
@@ -122,21 +124,51 @@ class LocalPlayerEndpoints(
 
     // --- WebRTC: one single-use channel per connection attempt ---
 
+    // The Sendspin supervisor opens one connection at a time, so these need no lock.
+    private val channelPlan = SendspinChannelPlan()
     private var usedChannel: DataChannelWrapper? = null
+    // The negotiated channel serves one connection. A reopened channel does not make it new again.
+    private var spentNegotiated: DataChannelWrapper? = null
+    private var lastReopened: DataChannelTransport? = null
 
     /**
      * The negotiated channel if no attempt used it yet, else a new channel on the live peer,
      * else a renegotiated peer connection. Only the last one interrupts the MA session.
      */
     private suspend fun openFreshChannel(): SendspinTransport {
-        val fresh = unusedNegotiatedChannel() ?: reopenedChannel() ?: renegotiatedChannel()
-        withTimeout(CHANNEL_TIMEOUT_MILLIS) { fresh.state.first { it == DataChannelState.Open } }
+        lastReopened?.let { channelPlan.onInBandChannelEnded(it.receivedFrames) }
+        lastReopened = null
+        val negotiated = unusedNegotiatedChannel()
+        var reopened: DataChannelWrapper? = null
+        val fresh = when (channelPlan.next(negotiatedUnused = negotiated != null, inBandSupported = labelRouting())) {
+            SendspinChannelSource.NEGOTIATED -> negotiated
+            SendspinChannelSource.IN_BAND -> reopenedChannel().also { reopened = it }
+            SendspinChannelSource.RENEGOTIATE -> null
+        } ?: renegotiatedChannel()
+        val state = withTimeout(CHANNEL_TIMEOUT_MILLIS) {
+            fresh.state.first { it == DataChannelState.Open || it == DataChannelState.Closed }
+        }
+        if (state != DataChannelState.Open) {
+            // A channel that the server refused never got a frame.
+            if (fresh === reopened) channelPlan.onInBandChannelEnded(receivedFrames = false)
+            // The Sendspin supervisor catches this as a failed connect attempt and retries.
+            error("Sendspin data channel closed before it opened")
+        }
         usedChannel = fresh
-        return DataChannelTransport(fresh)
+        // A renegotiated peer brings its own negotiated channel, and this attempt spends it too.
+        if (fresh !== reopened) spentNegotiated = fresh
+        return DataChannelTransport(fresh).also { transport ->
+            if (fresh === reopened) lastReopened = transport
+        }
     }
 
     private fun unusedNegotiatedChannel(): DataChannelWrapper? = apiClient.webrtcSendspinChannel
-        ?.takeIf { it !== usedChannel && it.state.value != DataChannelState.Closed }
+        ?.takeIf { it !== spentNegotiated && it.state.value != DataChannelState.Closed }
+
+    private fun labelRouting(): Boolean =
+        (apiClient.sessionState.value as? SessionState.Connected.WebRTC)
+            ?.serverInfo?.schemaVersion
+            ?.let { it >= LABEL_ROUTED_CHANNELS_SCHEMA } == true
 
     /**
      * A new channel on the live peer, signalled in-band. The server bridges one `sendspin`
@@ -144,9 +176,7 @@ class LocalPlayerEndpoints(
      * channel must close first. A server without label routing gets a renegotiation instead.
      */
     private suspend fun reopenedChannel(): DataChannelWrapper? {
-        val state = apiClient.sessionState.value as? SessionState.Connected.WebRTC ?: return null
-        val schema = state.serverInfo?.schemaVersion ?: return null
-        if (schema < LABEL_ROUTED_CHANNELS_SCHEMA) return null
+        if (!labelRouting()) return null
         usedChannel?.let { spent ->
             withTimeoutOrNull(SPENT_CLOSE_TIMEOUT_MILLIS) { spent.state.first { it == DataChannelState.Closed } }
         }
@@ -154,16 +184,21 @@ class LocalPlayerEndpoints(
             ?.also { log.i { "Sendspin data channel reopened on the live peer" } }
     }
 
+    /** Restarts the peer connection and waits for its negotiated channel. Restarts the API session too. */
     private suspend fun renegotiatedChannel(): DataChannelWrapper {
-        val current = apiClient.webrtcSendspinChannel
+        val spent = apiClient.webrtcSendspinChannel
         log.i { "Sendspin data channel spent; renegotiating WebRTC" }
+        channelPlan.onRenegotiated()
         apiClient.forceWebRTCReconnect()
-        withTimeout(CHANNEL_TIMEOUT_MILLIS) {
-            apiClient.sessionState.first {
-                it is SessionState.Connected.WebRTC && apiClient.webrtcSendspinChannel.let { c -> c != null && c !== current }
-            }
+        // The channel is taken in the same step that sees it, so it cannot turn null after the wait.
+        return withTimeout(CHANNEL_TIMEOUT_MILLIS) {
+            apiClient.sessionState
+                .mapNotNull { session ->
+                    apiClient.webrtcSendspinChannel
+                        ?.takeIf { session is SessionState.Connected.WebRTC && it !== spent }
+                }
+                .first()
         }
-        return checkNotNull(apiClient.webrtcSendspinChannel)
     }
 
     private companion object {
@@ -176,8 +211,14 @@ class LocalPlayerEndpoints(
 private class DataChannelTransport(private val wrapper: DataChannelWrapper) : SendspinTransport {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** True once the server sent anything on this channel, which proves it accepted the channel. */
+    @Volatile
+    var receivedFrames = false
+        private set
+
     override val inbound: ReceiveChannel<Frame> = scope.produce(capacity = INBOUND_CAPACITY) {
         wrapper.inbound.collect { message ->
+            receivedFrames = true
             send(
                 when (message) {
                     is DataChannelInbound.Text -> Frame.Text(message.text)
