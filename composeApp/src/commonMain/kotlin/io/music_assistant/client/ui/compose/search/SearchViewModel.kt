@@ -68,7 +68,8 @@ class SearchViewModel(
 ) : ViewModel() {
     val searchJob = AtomicReference<Job?>(null)
 
-    private val searchTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    // True for an explicit search (Search key, filter change), false for typing.
+    private val searchTrigger = MutableSharedFlow<Boolean>(extraBufferCapacity = 1)
 
     /** Recent search terms, newest first, shared with the web frontend. */
     val recentSearches: StateFlow<List<String>> = userPreferences.recentSearches
@@ -99,19 +100,26 @@ class SearchViewModel(
     val state = _state.asStateFlow()
 
     init {
-        // Explicit-trigger search, debounced for sanity (rapid taps, filter toggles).
+        // Search as you type, and on explicit triggers. Debounced so a burst of keystrokes,
+        // taps or filter toggles sends one search. The state is read after the debounce, so
+        // a search uses the latest query.
         viewModelScope.launch {
             searchTrigger
                 .debounce(Timings.INPUT_DEBOUNCE)
-                .collect {
+                .collect { explicit ->
                     // Read the sources now: a save just before the search is in the flows already,
                     // but not yet in the state.
                     val searchState = _state.value.searchState.copy(sources = currentSources())
-                    if (searchState.query.isNotBlank()) {
-                        searchedQuery = searchState.query
-                        performSearch(searchState)
-                    } else {
-                        _state.update { it.copy(resultsState = DataState.NoData()) }
+                    when (searchTriggerAction(searchState.query, explicit)) {
+                        SearchTriggerAction.CLEAR -> {
+                            searchJob.exchange(null)?.cancel()
+                            _state.update { it.copy(resultsState = DataState.NoData()) }
+                        }
+                        SearchTriggerAction.SEARCH -> {
+                            searchedQuery = searchState.query
+                            performSearch(searchState)
+                        }
+                        SearchTriggerAction.IGNORE -> Unit
                     }
                 }
         }
@@ -153,15 +161,17 @@ class SearchViewModel(
                 ),
             )
         }
-        searchTrigger.tryEmit(Unit)
+        searchTrigger.tryEmit(true)
     }
 
     fun onQueryChanged(query: String) {
+        val previous = _state.value.searchState.query
         _state.update { it.copy(searchState = it.searchState.copy(query = query)) }
+        if (query != previous) searchTrigger.tryEmit(false)
     }
 
     fun onSearch() {
-        searchTrigger.tryEmit(Unit)
+        searchTrigger.tryEmit(true)
     }
 
     /**
@@ -185,10 +195,10 @@ class SearchViewModel(
             ?.let {
                 viewModelScope.launch {
                     userPreferences.setSearchSources(it)
-                    searchTrigger.tryEmit(Unit)
+                    searchTrigger.tryEmit(true)
                 }
             }
-            ?: searchTrigger.tryEmit(Unit)
+            ?: searchTrigger.tryEmit(true)
     }
 
     private fun currentSources() = sourcesOf(
@@ -231,8 +241,9 @@ class SearchViewModel(
     }
 
     private fun updateSearchResultsIfNeeded(changed: Track, change: MediaItemChange) {
-        val resultsData = (_state.value.resultsState as? DataState.Data)?.data
-        if (resultsData != null) {
+        // Read the results inside update, so a search that lands meanwhile is not overwritten.
+        _state.update { state ->
+            val resultsData = (state.resultsState as? DataState.Data)?.data ?: return@update state
             val updatedTracks = resultsData.tracks.map { track ->
                 if (track.hasAnyMappingFrom(changed)) {
                     changed.withFavorite(change.favoriteAfter(track.favorite))
@@ -240,9 +251,7 @@ class SearchViewModel(
                     track
                 }
             }
-            _state.update {
-                it.copy(resultsState = DataState.Data(resultsData.copy(tracks = updatedTracks)))
-            }
+            state.copy(resultsState = DataState.Data(resultsData.copy(tracks = updatedTracks)))
         }
     }
 
@@ -274,6 +283,8 @@ class SearchViewModel(
             },
         )?.cancel()
     }
+
+    internal enum class SearchTriggerAction { CLEAR, SEARCH, IGNORE }
 
     data class State(
         val searchState: SearchState,
@@ -323,6 +334,9 @@ class SearchViewModel(
     }
 
     internal companion object {
+        /** Typing searches once the query has this many characters; the Search key always searches. */
+        const val MIN_TYPED_QUERY_LENGTH = 2
+
         // music/search applies `limit` PER MEDIA TYPE, and streaming providers page it in
         // chunks of 10 behind a rate limiter (~1.0-1.5s per page). The server abandons a
         // provider that takes longer than its soft timeout (8s) and reports it as empty,
@@ -333,6 +347,13 @@ class SearchViewModel(
 
         /** A single selected type renders as a full list, so fetch deeper. */
         const val SEARCH_LIMIT_FOCUSED = 30
+
+        /** What a debounced trigger does with [query]; [explicit] is the Search key or a filter change. */
+        fun searchTriggerAction(query: String, explicit: Boolean): SearchTriggerAction = when {
+            query.isBlank() -> SearchTriggerAction.CLEAR
+            explicit || query.trim().length >= MIN_TYPED_QUERY_LENGTH -> SearchTriggerAction.SEARCH
+            else -> SearchTriggerAction.IGNORE
+        }
 
         /** Pick the limit from the number of selected filter chips (0 = all types). */
         private fun sourcesOf(

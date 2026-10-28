@@ -122,6 +122,17 @@ class RpcEngine(
         return removed
     }
 
+    /**
+     * Fails the request [messageId] with [cause] if it is still pending. Returns false when
+     * the request was already answered, failed or withdrawn.
+     */
+    fun fail(messageId: String, cause: Throwable): Boolean {
+        val callback = pendingResponses.getAndUpdate { it - messageId }[messageId]
+        partialResults.update { it - messageId }
+        callback?.invoke(Result.failure(cause))
+        return callback != null
+    }
+
     /** Fails every pending request with [cause]. Call on every transport loss: replies never cross connections. */
     fun failAll(cause: Throwable) {
         val pending = pendingResponses.getAndUpdate { emptyMap() }
