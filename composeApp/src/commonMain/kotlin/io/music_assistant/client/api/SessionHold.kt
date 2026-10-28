@@ -9,10 +9,10 @@ import kotlin.time.TimeSource
  * server. Stamped at the command choke point, so a request issued from a system
  * transport control keeps the reconnect it just asked for alive.
  *
- * Stamp-only by design: `sendRequestRaw` has no per-request timeout, so a hold
- * released on completion would leak forever on a silently dead socket. [ttl] is
- * the bound; the cost of over-holding is one [ttl] of extra background socket
- * after the last command.
+ * Stamp-only by design: a playback command may wait minutes for its answer
+ * (`answerTimeout`), so a hold released on completion would keep a silently dead
+ * socket alive for that long. [ttl] is the bound; the cost of over-holding is one
+ * [ttl] of extra background socket after the last command.
  */
 internal class SessionHold(
     private val ttl: Duration,
