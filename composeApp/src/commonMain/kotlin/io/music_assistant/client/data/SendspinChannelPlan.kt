@@ -16,8 +16,9 @@ internal enum class SendspinChannelSource {
  * Picks the data channel for each Sendspin connection over WebRTC. A channel serves one
  * connection. The negotiated channel comes first. After it, a channel opened in-band replaces
  * it, so a Sendspin reconnect does not restart the API session. A full renegotiation is the
- * fallback when the server cannot route the label (below `LABEL_ROUTED_CHANNELS_SCHEMA`), or when [MAX_SILENT_IN_BAND] in-band
- * channels in a row closed before the server sent anything on them.
+ * fallback when the server cannot route the label (below `LABEL_ROUTED_CHANNELS_SCHEMA`), or
+ * when [MAX_SILENT_IN_BAND] in-band channels in a row closed before the server sent anything
+ * on them.
  */
 internal class SendspinChannelPlan {
     private var silentInBandStreak = 0
