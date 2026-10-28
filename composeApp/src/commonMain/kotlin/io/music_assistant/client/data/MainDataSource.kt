@@ -175,10 +175,7 @@ class MainDataSource(
         val busyQueueIds: Set<String>,
     )
 
-    /**
-     * Connection status of the local (Sendspin) player for the UI; null while disabled. It
-     * changes only on a connection change, not with the buffer level of each audio chunk.
-     */
+    /** Connection status of the local (Sendspin) player for the UI; null while disabled. */
     val sendspinState: StateFlow<LocalPlayerStatus?> = localPlayerController.playerState.localPlayerStatus()
 
     /** Seconds of audio buffered ahead of the local playhead (buffered-progress indicator). */
