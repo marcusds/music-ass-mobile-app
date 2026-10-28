@@ -127,6 +127,8 @@ class LocalPlayerEndpoints(
     // The Sendspin supervisor opens one connection at a time, so these need no lock.
     private val channelPlan = SendspinChannelPlan()
     private var usedChannel: DataChannelWrapper? = null
+    // The negotiated channel serves one connection. A reopened channel does not make it new again.
+    private var spentNegotiated: DataChannelWrapper? = null
     private var lastReopened: DataChannelTransport? = null
 
     /**
@@ -153,13 +155,15 @@ class LocalPlayerEndpoints(
             error("Sendspin data channel closed before it opened")
         }
         usedChannel = fresh
+        // A renegotiated peer brings its own negotiated channel, and this attempt spends it too.
+        if (fresh !== reopened) spentNegotiated = fresh
         return DataChannelTransport(fresh).also { transport ->
             if (fresh === reopened) lastReopened = transport
         }
     }
 
     private fun unusedNegotiatedChannel(): DataChannelWrapper? = apiClient.webrtcSendspinChannel
-        ?.takeIf { it !== usedChannel && it.state.value != DataChannelState.Closed }
+        ?.takeIf { it !== spentNegotiated && it.state.value != DataChannelState.Closed }
 
     private fun labelRouting(): Boolean =
         (apiClient.sessionState.value as? SessionState.Connected.WebRTC)
