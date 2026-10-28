@@ -58,6 +58,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -79,6 +80,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowSizeClass
+import io.music_assistant.client.data.LocalPlayerStatus
 import io.music_assistant.client.data.announcement.AnnouncementRepository
 import io.music_assistant.client.data.hasFavoritableStreamTrack
 import io.music_assistant.client.data.model.client.AppMediaItemFixtures
@@ -123,7 +125,6 @@ import io.music_assistant.client.ui.compose.provider.ProviderViewModel
 import io.music_assistant.client.ui.inactive
 import io.music_assistant.client.ui.utils.WindowClass
 import io.music_assistant.client.utils.conditional
-import io.music_assistant.sendspin.api.PlayerState
 import kotlinx.coroutines.flow.Flow
 import musicassistantclient.composeapp.generated.resources.Res
 import musicassistantclient.composeapp.generated.resources.action_add_to_playlist
@@ -233,14 +234,16 @@ fun PlayersPager(
             onDismiss = { dialogRequest = null },
         )
 
-        val playerColors = playerDataList.associateWith {
-            val media = it.player.currentMedia
-            rememberAnimatedPlayerColors(
-                imageUrl = media?.imageUrl,
-                fallback = MaterialTheme.colorScheme.primaryContainer,
-                source = colorsSource,
-                enabled = dynamicColorsEnabled,
-            )
+        // Keyed by player id: hashing PlayerData walks the whole queue.
+        val playerColors = playerDataList.associate { playerData ->
+            key(playerData.playerId) {
+                playerData.playerId to rememberAnimatedPlayerColors(
+                    imageUrl = playerData.player.currentMedia?.imageUrl,
+                    fallback = MaterialTheme.colorScheme.primaryContainer,
+                    source = colorsSource,
+                    enabled = dynamicColorsEnabled,
+                )
+            }
         }
         val isWideScreen = WindowClass.isWide()
         val modifier = if (!expanded) {
@@ -341,7 +344,7 @@ fun PlayersPager(
                     }
                 }
 
-                val colors by playerColors.getValue(player)
+                val colors by playerColors.getValue(playerId)
 
                 Box(modifier = Modifier.wrapContentHeight()) {
                     Column(
@@ -517,7 +520,7 @@ private fun ExpandedPlayerPage(
     allPlayers: List<PlayerData>,
     moveToPlayer: (String) -> Unit,
     isWideScreen: Boolean,
-    sendspinState: PlayerState?,
+    sendspinState: LocalPlayerStatus?,
     isQueueExpanded: Boolean,
     onExpandQueue: (Boolean) -> Unit,
     contentPadding: PaddingValues,
@@ -1124,7 +1127,7 @@ private fun CollapsedPlayerPage(
     isWideScreen: Boolean,
     player: PlayerData,
     colors: PlayerColors,
-    sendspinState: PlayerState?,
+    sendspinState: LocalPlayerStatus?,
     onSelectPlayer: () -> Unit,
     playerAction: (PlayerData, PlayerAction) -> Unit,
     // Server preference gate for chapter-based Next enablement and the chapter subtitle.
