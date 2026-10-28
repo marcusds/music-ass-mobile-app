@@ -51,8 +51,6 @@ class AndroidHttpClientFactory(
             config {
                 sslSocketFactory(socketFactory, trustManager)
                 connectionPool(connectionPool)
-                // The OkHttp engine ignores the WebSockets plugin's pingInterval, so without
-                // this a WebSocket never pings and only TCP notices a dead link.
                 pingInterval(WEBSOCKET_PING_INTERVAL)
             }
         }
