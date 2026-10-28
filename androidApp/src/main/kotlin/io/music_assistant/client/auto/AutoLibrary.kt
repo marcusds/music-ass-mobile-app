@@ -15,7 +15,7 @@ import io.music_assistant.client.R
 import io.music_assistant.client.api.Answer
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
-import io.music_assistant.client.api.fetchAllPages
+import io.music_assistant.client.api.paged
 import io.music_assistant.client.data.MainDataSource
 import io.music_assistant.client.data.executeLocalPlayerDispatch
 import io.music_assistant.client.data.factory.MediaItemFactory
@@ -443,8 +443,10 @@ class AutoLibrary(
 
             else -> return null
         }
-        return request
-            .fetchAllPages { apiClient.sendRequest(it).resultAs<List<ServerMediaItem>>() }
+        // One bounded page: the whole library would arrive in sequential pages and get an
+        // artwork token per row before the host shows anything.
+        return apiClient.sendRequest(request.paged(limit = SUB_LIST_LIMIT, offset = 0))
+            .resultAs<List<ServerMediaItem>>()
             ?.let { mediaItemFactory.createList(it) }
             ?.filter { it.isPlayable && !it.isAiRadioShow }
             ?.map { it.toAutoMediaItem(true, defaultIconUri, episodeNumbers) }
@@ -997,6 +999,10 @@ class AutoLibrary(
         // Random-favorites pool size. 200 keeps the shuffle interesting without
         // overloading the play_media RPC payload for users with large libraries.
         const val RANDOM_POOL_SIZE = 200
+
+        // Rows in one library sub-list (Recent, Favorites, New, By name). A car list is for a
+        // glance while driving, and the host limits how far the user may scroll anyway.
+        const val SUB_LIST_LIMIT = 300
     }
 }
 

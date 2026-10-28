@@ -385,6 +385,14 @@ Android foreground services integrate with Sendspin through MainDataSource:
   the Music Assistant UID, and streams a bounded JPEG. `onGetRoot` hands a prefix read grant to a
   caller whose package really owns its UID and that `MediaSessionManager` trusts for media control.
   Now-playing artwork is unaffected: it is already an in-process bitmap in the session metadata.
+- A library sub-list (Recent, Favorites, New, By name) loads one page of at most 300 rows, in the
+  sort from `LibrarySortRepository`. It never pages through the whole library.
+- `SharedMediaSessionManager` writes the playback state only when the state, the actions or the
+  position drift change. The drift is the position change minus the wall-clock change while
+  playing. It writes the metadata (with the album-art bitmap) only when the metadata or the bitmap
+  change. The bitmap uses `artworkImageRequest`, so it is decoded at the bounded artwork size.
+  The session queue holds a window of 200 slots around the current slot (`sessionQueueWindow`),
+  and the queue rows are rebuilt only when the queue items or the current slot change.
 
 **Key Pattern**: Services do NOT create or manage Sendspin directly. They access player data through MainDataSource's playersData StateFlow, maintaining a single source of truth.
 
