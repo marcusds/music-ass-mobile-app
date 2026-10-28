@@ -60,6 +60,6 @@ class AndroidHttpClientFactory(
     }
 
     private companion object {
-        val WEBSOCKET_PING_INTERVAL = 20.seconds.toJavaDuration()
+        val WEBSOCKET_PING_INTERVAL = 10.seconds.toJavaDuration()
     }
 }

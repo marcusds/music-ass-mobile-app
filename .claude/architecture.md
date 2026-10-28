@@ -219,7 +219,7 @@ actual class PlatformFeature {
   (`SettingsRepository.clientCertificateAlias`), for mTLS. Trust stays the platform default, so the network
   security config applies. All clients share one connection pool. A certificate change evicts that pool.
   The OkHttp engine ignores the `pingInterval` of the Ktor WebSockets plugin, so the factory sets the OkHttp
-  WebSocket ping (20 s). OkHttp closes a WebSocket when a pong is not back before the next ping.
+  WebSocket ping (10 s, as on iOS). OkHttp closes a WebSocket when a pong is not back before the next ping.
 - iOS (`IosHttpClientFactory`): Darwin. `handleChallenge` answers a client-certificate challenge with the identity
   in `KeychainClientIdentity`, only while `clientCertificateAlias` is set. The Darwin engine owns its session pool,
   so `KtorServiceClient` makes a new client when the certificate changes.
